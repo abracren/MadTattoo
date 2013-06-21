@@ -30044,40 +30044,6 @@ false,false,9733146001977147
 			]
 			],
 			[
-			[
-				2,
-				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
-				null,
-				2494667318711097
-				,[
-				[
-					0,
-					[
-						0,
-						180
-					]
-				]
-,				[
-					0,
-					[
-						19,
-						cr.system_object.prototype.exps.floor
-						,[
-[
-							19,
-							cr.system_object.prototype.exps.random
-							,[
-[
-								0,
-								-100
-							]
-							]
-						]
-						]
-					]
-				]
-				]
-			]
 			]
 		]
 ,		[
@@ -30107,40 +30073,6 @@ false,false,9733146001977147
 			]
 			],
 			[
-			[
-				2,
-				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
-				null,
-				324137895656796
-				,[
-				[
-					0,
-					[
-						0,
-						180
-					]
-				]
-,				[
-					0,
-					[
-						19,
-						cr.system_object.prototype.exps.floor
-						,[
-[
-							19,
-							cr.system_object.prototype.exps.random
-							,[
-[
-								0,
-								100
-							]
-							]
-						]
-						]
-					]
-				]
-				]
-			]
 			]
 		]
 ,		[
@@ -30170,40 +30102,6 @@ false,false,9733146001977147
 			]
 			],
 			[
-			[
-				2,
-				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
-				null,
-				1560002251436124
-				,[
-				[
-					0,
-					[
-						0,
-						180
-					]
-				]
-,				[
-					0,
-					[
-						19,
-						cr.system_object.prototype.exps.floor
-						,[
-[
-							19,
-							cr.system_object.prototype.exps.random
-							,[
-[
-								0,
-								-80
-							]
-							]
-						]
-						]
-					]
-				]
-				]
-			]
 			]
 		]
 ,		[
@@ -30233,44 +30131,6 @@ false,false,9733146001977147
 			]
 			],
 			[
-			[
-				2,
-				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
-				null,
-				6784444596109543
-				,[
-				[
-					0,
-					[
-						0,
-						180
-					]
-				]
-,				[
-					0,
-					[
-						19,
-						cr.system_object.prototype.exps.floor
-						,[
-[
-							19,
-							cr.system_object.prototype.exps.random
-							,[
-[
-								0,
-								-80
-							]
-,[
-								0,
-								80
-							]
-							]
-						]
-						]
-					]
-				]
-				]
-			]
 			]
 		]
 ,		[
@@ -30300,40 +30160,6 @@ false,false,9733146001977147
 			]
 			],
 			[
-			[
-				2,
-				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
-				null,
-				8720873005079578
-				,[
-				[
-					0,
-					[
-						0,
-						180
-					]
-				]
-,				[
-					0,
-					[
-						19,
-						cr.system_object.prototype.exps.floor
-						,[
-[
-							19,
-							cr.system_object.prototype.exps.random
-							,[
-[
-								0,
-								80
-							]
-							]
-						]
-						]
-					]
-				]
-				]
-			]
 			]
 		]
 ,		[
