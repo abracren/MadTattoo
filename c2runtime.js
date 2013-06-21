@@ -15372,7 +15372,7 @@ cr.getProjectModel = function() { return [
 		[],
 		0,
 		0,
-		["images/canvas3.png", 613, 1],
+		["images/canvas3.png", 330, 0],
 		null,
 		[
 		],
@@ -15388,7 +15388,7 @@ cr.getProjectModel = function() { return [
 		[],
 		0,
 		0,
-		["images/tiledbackground.png", 211, 0],
+		["images/tiledbackground.png", 114, 0],
 		null,
 		[
 		],
@@ -28994,6 +28994,25 @@ false,false,9733146001977147
 				]
 				]
 			]
+,			[
+				2,
+				cr.plugins_.Sprite.prototype.acts.SetAnim,
+				null,
+				6639409777215927
+				,[
+				[
+					1,
+					[
+						2,
+						"default"
+					]
+				]
+,				[
+					3,
+					1
+				]
+				]
+			]
 			]
 		]
 ,		[
@@ -29132,8 +29151,8 @@ false,false,9733146001977147
 				[
 					0,
 					[
-						1,
-						0.3
+						0,
+						2
 					]
 				]
 				]
@@ -29407,6 +29426,217 @@ false,false,9733146001977147
 			]
 			,[
 			[
+				0,
+				null,
+				false,
+				64173143633061,
+				[
+				[
+					-1,
+					cr.system_object.prototype.cnds.CompareBetween,
+					null,
+					0,
+					false,
+					false,
+					false,
+					948550109784615
+					,[
+					[
+						0,
+						[
+							20,
+							2,
+							cr.plugins_.Sprite.prototype.exps.X,
+							false,
+							null
+						]
+					]
+,					[
+						0,
+						[
+							5,
+							[
+								20,
+								1,
+								cr.plugins_.Sprite.prototype.exps.X,
+								false,
+								null
+							]
+							,[
+								0,
+								200
+							]
+						]
+					]
+,					[
+						0,
+						[
+							20,
+							1,
+							cr.plugins_.Sprite.prototype.exps.X,
+							false,
+							null
+						]
+					]
+					]
+				]
+				],
+				[
+				[
+					5,
+					cr.plugins_.Sprite.prototype.acts.SetVisible,
+					null,
+					4576658689867049
+					,[
+					[
+						3,
+						0
+					]
+					]
+				]
+,				[
+					4,
+					cr.plugins_.Sprite.prototype.acts.SetVisible,
+					null,
+					1251686205058164
+					,[
+					[
+						3,
+						1
+					]
+					]
+				]
+,				[
+					-1,
+					cr.system_object.prototype.acts.SetVar,
+					null,
+					7266002038877457
+					,[
+					[
+						11,
+						"side"
+					]
+,					[
+						7,
+						[
+							2,
+							"left"
+						]
+					]
+					]
+				]
+				]
+			]
+,			[
+				0,
+				null,
+				false,
+				5967403757621491,
+				[
+				[
+					-1,
+					cr.system_object.prototype.cnds.CompareBetween,
+					null,
+					0,
+					false,
+					false,
+					false,
+					1643117101502162
+					,[
+					[
+						0,
+						[
+							20,
+							2,
+							cr.plugins_.Sprite.prototype.exps.X,
+							false,
+							null
+						]
+					]
+,					[
+						0,
+						[
+							4,
+							[
+								20,
+								1,
+								cr.plugins_.Sprite.prototype.exps.X,
+								false,
+								null
+							]
+							,[
+								0,
+								1
+							]
+						]
+					]
+,					[
+						0,
+						[
+							4,
+							[
+								20,
+								1,
+								cr.plugins_.Sprite.prototype.exps.X,
+								false,
+								null
+							]
+							,[
+								0,
+								200
+							]
+						]
+					]
+					]
+				]
+				],
+				[
+				[
+					5,
+					cr.plugins_.Sprite.prototype.acts.SetVisible,
+					null,
+					1344052363759293
+					,[
+					[
+						3,
+						1
+					]
+					]
+				]
+,				[
+					4,
+					cr.plugins_.Sprite.prototype.acts.SetVisible,
+					null,
+					7800154530863496
+					,[
+					[
+						3,
+						0
+					]
+					]
+				]
+,				[
+					-1,
+					cr.system_object.prototype.acts.SetVar,
+					null,
+					6360750932951064
+					,[
+					[
+						11,
+						"side"
+					]
+,					[
+						7,
+						[
+							2,
+							"right"
+						]
+					]
+					]
+				]
+				]
+			]
+,			[
 				0,
 				null,
 				false,
