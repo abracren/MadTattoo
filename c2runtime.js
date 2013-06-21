@@ -11143,2926 +11143,6 @@ cr.plugins_.Arr = function(runtime)
 }());
 ;
 ;
-cr.plugins_.Audio = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Audio.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	var audRuntime = null;
-	var audInst = null;
-	var audTag = "";
-	var appPath = "";			// for PhoneGap only
-	var API_HTML5 = 0;
-	var API_WEBAUDIO = 1;
-	var API_PHONEGAP = 2;
-	var API_APPMOBI = 3;
-	var api = API_HTML5;
-	var context = null;
-	var audioBuffers = [];		// cache of buffers
-	var audioInstances = [];	// cache of instances
-	var lastAudio = null;
-	var useOgg = false;			// determined at create time
-	var timescale_mode = 0;
-	var silent = false;
-	var masterVolume = 1;
-	var panningModel = 1;		// HRTF
-	var distanceModel = 1;		// Inverse
-	var refDistance = 10;
-	var maxDistance = 10000;
-	var rolloffFactor = 1;
-	var micSource = null;
-	var micTag = "";
-	function dbToLinear(x)
-	{
-		var v = dbToLinear_nocap(x);
-		if (v < 0)
-			v = 0;
-		if (v > 1)
-			v = 1;
-		return v;
-	};
-	function linearToDb(x)
-	{
-		if (x < 0)
-			x = 0;
-		if (x > 1)
-			x = 1;
-		return linearToDb_nocap(x);
-	};
-	function dbToLinear_nocap(x)
-	{
-		return Math.pow(10, x / 20);
-	};
-	function linearToDb_nocap(x)
-	{
-		return (Math.log(x) / Math.log(10)) * 20;
-	};
-	var effects = {};
-	function getDestinationForTag(tag)
-	{
-		tag = tag.toLowerCase();
-		if (effects.hasOwnProperty(tag))
-		{
-			if (effects[tag].length)
-				return effects[tag][0].getInputNode();
-		}
-		return context["destination"];
-	};
-	function createGain()
-	{
-		if (context["createGain"])
-			return context["createGain"]();
-		else
-			return context["createGainNode"]();
-	};
-	function createDelay(d)
-	{
-		if (context["createDelay"])
-			return context["createDelay"](d);
-		else
-			return context["createDelayNode"](d);
-	};
-	function startSource(s)
-	{
-		if (s["start"])
-			s["start"](0);
-		else
-			s["noteOn"](0);
-	};
-	function startSourceAt(s, x, d)
-	{
-		if (s["start"])
-			s["start"](0, x);
-		else
-			s["noteGrainOn"](0, x, d - x);
-	};
-	function stopSource(s)
-	{
-		if (s["stop"])
-			s["stop"](0);
-		else
-			s["noteOff"](0);
-	};
-	function setAudioParam(ap, value, ramp, time)
-	{
-		if (!ap)
-			return;		// iOS is missing some parameters
-		ap["cancelScheduledValues"](0);
-		if (time === 0)
-		{
-			ap["value"] = value;
-			return;
-		}
-		var curTime = context["currentTime"];
-		time += curTime;
-		switch (ramp) {
-		case 0:		// step
-			ap["setValueAtTime"](value, time);
-			break;
-		case 1:		// linear
-			ap["setValueAtTime"](ap["value"], curTime);		// to set what to ramp from
-			ap["linearRampToValueAtTime"](value, time);
-			break;
-		case 2:		// exponential
-			ap["setValueAtTime"](ap["value"], curTime);		// to set what to ramp from
-			ap["exponentialRampToValueAtTime"](value, time);
-			break;
-		}
-	};
-	var filterTypes = ["lowpass", "highpass", "bandpass", "lowshelf", "highshelf", "peaking", "notch", "allpass"];
-	function FilterEffect(type, freq, detune, q, gain, mix)
-	{
-		this.type = "filter";
-		this.params = [type, freq, detune, q, gain, mix];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.filterNode = context["createBiquadFilter"]();
-		if (typeof this.filterNode["type"] === "number")
-			this.filterNode["type"] = type;
-		else
-			this.filterNode["type"] = filterTypes[type];
-		this.filterNode["frequency"]["value"] = freq;
-		if (this.filterNode["detune"])		// iOS 6 doesn't have detune yet
-			this.filterNode["detune"]["value"] = detune;
-		this.filterNode["Q"]["value"] = q;
-		this.filterNode["gain"]["value"] = gain;
-		this.inputNode["connect"](this.filterNode);
-		this.inputNode["connect"](this.dryNode);
-		this.filterNode["connect"](this.wetNode);
-	};
-	FilterEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	FilterEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.filterNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	FilterEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	FilterEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[4] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		case 1:		// filter frequency
-			this.params[0] = value;
-			setAudioParam(this.filterNode["frequency"], value, ramp, time);
-			break;
-		case 2:		// filter detune
-			this.params[1] = value;
-			setAudioParam(this.filterNode["detune"], value, ramp, time);
-			break;
-		case 3:		// filter Q
-			this.params[2] = value;
-			setAudioParam(this.filterNode["Q"], value, ramp, time);
-			break;
-		case 4:		// filter/delay gain (note value is in dB here)
-			this.params[3] = value;
-			setAudioParam(this.filterNode["gain"], value, ramp, time);
-			break;
-		}
-	};
-	function DelayEffect(delayTime, delayGain, mix)
-	{
-		this.type = "delay";
-		this.params = [delayTime, delayGain, mix];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.mainNode = createGain();
-		this.delayNode = createDelay(delayTime);
-		this.delayNode["delayTime"]["value"] = delayTime;
-		this.delayGainNode = createGain();
-		this.delayGainNode["gain"]["value"] = delayGain;
-		this.inputNode["connect"](this.mainNode);
-		this.inputNode["connect"](this.dryNode);
-		this.mainNode["connect"](this.wetNode);
-		this.mainNode["connect"](this.delayNode);
-		this.delayNode["connect"](this.delayGainNode);
-		this.delayGainNode["connect"](this.mainNode);
-	};
-	DelayEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	DelayEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.mainNode["disconnect"]();
-		this.delayNode["disconnect"]();
-		this.delayGainNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	DelayEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	DelayEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[2] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		case 4:		// filter/delay gain (note value is passed in dB but needs to be linear here)
-			this.params[1] = dbToLinear(value);
-			setAudioParam(this.delayGainNode["gain"], dbToLinear(value), ramp, time);
-			break;
-		case 5:		// delay time
-			this.params[0] = value;
-			setAudioParam(this.delayNode["delayTime"], value, ramp, time);
-			break;
-		}
-	};
-	function ConvolveEffect(buffer, normalize, mix, src)
-	{
-		this.type = "convolve";
-		this.params = [normalize, mix, src];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.convolveNode = context["createConvolver"]();
-		if (buffer)
-		{
-			this.convolveNode["normalize"] = normalize;
-			this.convolveNode["buffer"] = buffer;
-		}
-		this.inputNode["connect"](this.convolveNode);
-		this.inputNode["connect"](this.dryNode);
-		this.convolveNode["connect"](this.wetNode);
-	};
-	ConvolveEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	ConvolveEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.convolveNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	ConvolveEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	ConvolveEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[1] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		}
-	};
-	function FlangerEffect(delay, modulation, freq, feedback, mix)
-	{
-		this.type = "flanger";
-		this.params = [delay, modulation, freq, feedback, mix];
-		this.inputNode = createGain();
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - (mix / 2);
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix / 2;
-		this.feedbackNode = createGain();
-		this.feedbackNode["gain"]["value"] = feedback;
-		this.delayNode = createDelay(delay + modulation);
-		this.delayNode["delayTime"]["value"] = delay;
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = freq;
-		this.oscGainNode = createGain();
-		this.oscGainNode["gain"]["value"] = modulation;
-		this.inputNode["connect"](this.delayNode);
-		this.inputNode["connect"](this.dryNode);
-		this.delayNode["connect"](this.wetNode);
-		this.delayNode["connect"](this.feedbackNode);
-		this.feedbackNode["connect"](this.delayNode);
-		this.oscNode["connect"](this.oscGainNode);
-		this.oscGainNode["connect"](this.delayNode["delayTime"]);
-		startSource(this.oscNode);
-	};
-	FlangerEffect.prototype.connectTo = function (node)
-	{
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-	};
-	FlangerEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.delayNode["disconnect"]();
-		this.oscNode["disconnect"]();
-		this.oscGainNode["disconnect"]();
-		this.dryNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.feedbackNode["disconnect"]();
-	};
-	FlangerEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	FlangerEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[4] = value;
-			setAudioParam(this.wetNode["gain"], value / 2, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - (value / 2), ramp, time);
-			break;
-		case 6:		// modulation
-			this.params[1] = value / 1000;
-			setAudioParam(this.oscGainNode["gain"], value / 1000, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[2] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		case 8:		// feedback
-			this.params[3] = value / 100;
-			setAudioParam(this.feedbackNode["gain"], value / 100, ramp, time);
-			break;
-		}
-	};
-	function PhaserEffect(freq, detune, q, modulation, modfreq, mix)
-	{
-		this.type = "phaser";
-		this.params = [freq, detune, q, modulation, modfreq, mix];
-		this.inputNode = createGain();
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - (mix / 2);
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix / 2;
-		this.filterNode = context["createBiquadFilter"]();
-		if (typeof this.filterNode["type"] === "number")
-			this.filterNode["type"] = 7;	// all-pass
-		else
-			this.filterNode["type"] = "allpass";
-		this.filterNode["frequency"]["value"] = freq;
-		if (this.filterNode["detune"])		// iOS 6 doesn't have detune yet
-			this.filterNode["detune"]["value"] = detune;
-		this.filterNode["Q"]["value"] = q;
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = modfreq;
-		this.oscGainNode = createGain();
-		this.oscGainNode["gain"]["value"] = modulation;
-		this.inputNode["connect"](this.filterNode);
-		this.inputNode["connect"](this.dryNode);
-		this.filterNode["connect"](this.wetNode);
-		this.oscNode["connect"](this.oscGainNode);
-		this.oscGainNode["connect"](this.filterNode["frequency"]);
-		startSource(this.oscNode);
-	};
-	PhaserEffect.prototype.connectTo = function (node)
-	{
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-	};
-	PhaserEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.filterNode["disconnect"]();
-		this.oscNode["disconnect"]();
-		this.oscGainNode["disconnect"]();
-		this.dryNode["disconnect"]();
-		this.wetNode["disconnect"]();
-	};
-	PhaserEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	PhaserEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[5] = value;
-			setAudioParam(this.wetNode["gain"], value / 2, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - (value / 2), ramp, time);
-			break;
-		case 1:		// filter frequency
-			this.params[0] = value;
-			setAudioParam(this.filterNode["frequency"], value, ramp, time);
-			break;
-		case 2:		// filter detune
-			this.params[1] = value;
-			setAudioParam(this.filterNode["detune"], value, ramp, time);
-			break;
-		case 3:		// filter Q
-			this.params[2] = value;
-			setAudioParam(this.filterNode["Q"], value, ramp, time);
-			break;
-		case 6:		// modulation
-			this.params[3] = value;
-			setAudioParam(this.oscGainNode["gain"], value, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[4] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		}
-	};
-	function GainEffect(g)
-	{
-		this.type = "gain";
-		this.params = [g];
-		this.node = createGain();
-		this.node["gain"]["value"] = g;
-	};
-	GainEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	GainEffect.prototype.remove = function ()
-	{
-		this.node["disconnect"]();
-	};
-	GainEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	GainEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 4:		// gain
-			this.params[0] = dbToLinear(value);
-			setAudioParam(this.node["gain"], dbToLinear(value), ramp, time);
-			break;
-		}
-	};
-	function TremoloEffect(freq, mix)
-	{
-		this.type = "tremolo";
-		this.params = [freq, mix];
-		this.node = createGain();
-		this.node["gain"]["value"] = 1 - (mix / 2);
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = freq;
-		this.oscGainNode = createGain();
-		this.oscGainNode["gain"]["value"] = mix / 2;
-		this.oscNode["connect"](this.oscGainNode);
-		this.oscGainNode["connect"](this.node["gain"]);
-		startSource(this.oscNode);
-	};
-	TremoloEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	TremoloEffect.prototype.remove = function ()
-	{
-		this.oscNode["disconnect"]();
-		this.oscGainNode["disconnect"]();
-		this.node["disconnect"]();
-	};
-	TremoloEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	TremoloEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[1] = value;
-			setAudioParam(this.node["gain"]["value"], 1 - (value / 2), ramp, time);
-			setAudioParam(this.oscGainNode["gain"]["value"], value / 2, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[0] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		}
-	};
-	function RingModulatorEffect(freq, mix)
-	{
-		this.type = "ringmod";
-		this.params = [freq, mix];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.ringNode = createGain();
-		this.ringNode["gain"]["value"] = 0;
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = freq;
-		this.oscNode["connect"](this.ringNode["gain"]);
-		startSource(this.oscNode);
-		this.inputNode["connect"](this.ringNode);
-		this.inputNode["connect"](this.dryNode);
-		this.ringNode["connect"](this.wetNode);
-	};
-	RingModulatorEffect.prototype.connectTo = function (node_)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node_);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node_);
-	};
-	RingModulatorEffect.prototype.remove = function ()
-	{
-		this.oscNode["disconnect"]();
-		this.ringNode["disconnect"]();
-		this.inputNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	RingModulatorEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	RingModulatorEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[1] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[0] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		}
-	};
-	function DistortionEffect(threshold, headroom, drive, makeupgain, mix)
-	{
-		this.type = "distortion";
-		this.params = [threshold, headroom, drive, makeupgain, mix];
-		this.inputNode = createGain();
-		this.preGain = createGain();
-		this.postGain = createGain();
-		this.setDrive(drive, dbToLinear_nocap(makeupgain));
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.waveShaper = context["createWaveShaper"]();
-		this.curve = new Float32Array(65536);
-		this.generateColortouchCurve(threshold, headroom);
-		this.waveShaper.curve = this.curve;
-		this.inputNode["connect"](this.preGain);
-		this.inputNode["connect"](this.dryNode);
-		this.preGain["connect"](this.waveShaper);
-		this.waveShaper["connect"](this.postGain);
-		this.postGain["connect"](this.wetNode);
-	};
-	DistortionEffect.prototype.setDrive = function (drive, makeupgain)
-	{
-		if (drive < 0.01)
-			drive = 0.01;
-		this.preGain["gain"]["value"] = drive;
-		this.postGain["gain"]["value"] = Math.pow(1 / drive, 0.6) * makeupgain;
-	};
-	function e4(x, k)
-	{
-		return 1.0 - Math.exp(-k * x);
-	}
-	DistortionEffect.prototype.shape = function (x, linearThreshold, linearHeadroom)
-	{
-		var maximum = 1.05 * linearHeadroom * linearThreshold;
-		var kk = (maximum - linearThreshold);
-		var sign = x < 0 ? -1 : +1;
-		var absx = x < 0 ? -x : x;
-		var shapedInput = absx < linearThreshold ? absx : linearThreshold + kk * e4(absx - linearThreshold, 1.0 / kk);
-		shapedInput *= sign;
-		return shapedInput;
-	};
-	DistortionEffect.prototype.generateColortouchCurve = function (threshold, headroom)
-	{
-		var linearThreshold = dbToLinear_nocap(threshold);
-		var linearHeadroom = dbToLinear_nocap(headroom);
-		var n = 65536;
-		var n2 = n / 2;
-		var x = 0;
-		for (var i = 0; i < n2; ++i) {
-			x = i / n2;
-			x = this.shape(x, linearThreshold, linearHeadroom);
-			this.curve[n2 + i] = x;
-			this.curve[n2 - i - 1] = -x;
-		}
-	};
-	DistortionEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	DistortionEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.preGain["disconnect"]();
-		this.waveShaper["disconnect"]();
-		this.postGain["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	DistortionEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	DistortionEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[4] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		}
-	};
-	function CompressorEffect(threshold, knee, ratio, attack, release)
-	{
-		this.type = "compressor";
-		this.params = [threshold, knee, ratio, attack, release];
-		this.node = context["createDynamicsCompressor"]();
-		this.node["threshold"]["value"] = threshold;
-		this.node["knee"]["value"] = knee;
-		this.node["ratio"]["value"] = ratio;
-		this.node["attack"]["value"] = attack;
-		this.node["release"]["value"] = release;
-	};
-	CompressorEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	CompressorEffect.prototype.remove = function ()
-	{
-		this.node["disconnect"]();
-	};
-	CompressorEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	CompressorEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-	};
-	function AnalyserEffect(fftSize, smoothing)
-	{
-		this.type = "analyser";
-		this.params = [fftSize, smoothing];
-		this.node = context["createAnalyser"]();
-		this.node["fftSize"] = fftSize;
-		this.node["smoothingTimeConstant"] = smoothing;
-		this.freqBins = new Float32Array(this.node["frequencyBinCount"]);
-		this.signal = new Uint8Array(fftSize);
-		this.peak = 0;
-		this.rms = 0;
-	};
-	AnalyserEffect.prototype.tick = function ()
-	{
-		this.node["getFloatFrequencyData"](this.freqBins);
-		this.node["getByteTimeDomainData"](this.signal);
-		var fftSize = this.node["fftSize"];
-		var i = 0;
-		this.peak = 0;
-		var rmsSquaredSum = 0;
-		var s = 0;
-		for ( ; i < fftSize; i++)
-		{
-			s = (this.signal[i] - 128) / 128;
-			if (s < 0)
-				s = -s;
-			if (this.peak < s)
-				this.peak = s;
-			rmsSquaredSum += s * s;
-		}
-		this.peak = linearToDb(this.peak);
-		this.rms = linearToDb(Math.sqrt(rmsSquaredSum / fftSize));
-	};
-	AnalyserEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	AnalyserEffect.prototype.remove = function ()
-	{
-		this.node["disconnect"]();
-	};
-	AnalyserEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	AnalyserEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-	};
-	var OT_POS_SAMPLES = 4;
-	function ObjectTracker()
-	{
-		this.obj = null;
-		this.loadUid = 0;
-		this.speeds = [];
-		this.lastX = 0;
-		this.lastY = 0;
-		this.moveAngle = 0;
-	};
-	ObjectTracker.prototype.setObject = function (obj_)
-	{
-		this.obj = obj_;
-		if (this.obj)
-		{
-			this.lastX = this.obj.x;
-			this.lastY = this.obj.y;
-		}
-		this.speeds.length = 0;
-	};
-	ObjectTracker.prototype.hasObject = function ()
-	{
-		return !!this.obj;
-	};
-	ObjectTracker.prototype.tick = function (dt)
-	{
-		if (!this.obj)
-			return;
-		this.moveAngle = cr.angleTo(this.lastX, this.lastY, this.obj.x, this.obj.y);
-		var s = cr.distanceTo(this.lastX, this.lastY, this.obj.x, this.obj.y) / dt;
-		if (this.speeds.length < OT_POS_SAMPLES)
-			this.speeds.push(s);
-		else
-		{
-			this.speeds.shift();
-			this.speeds.push(s);
-		}
-		this.lastX = this.obj.x;
-		this.lastY = this.obj.y;
-	};
-	ObjectTracker.prototype.getSpeed = function ()
-	{
-		if (!this.speeds.length)
-			return 0;
-		var i, len, sum = 0;
-		for (i = 0, len = this.speeds.length; i < len; i++)
-		{
-			sum += this.speeds[i];
-		}
-		return sum / this.speeds.length;
-	};
-	ObjectTracker.prototype.getVelocityX = function ()
-	{
-		return Math.cos(this.moveAngle) * this.getSpeed();
-	};
-	ObjectTracker.prototype.getVelocityY = function ()
-	{
-		return Math.sin(this.moveAngle) * this.getSpeed();
-	};
-	var iOShadtouch = false;	// has had touch input on iOS to work around web audio API muting
-	function C2AudioBuffer(src_, is_music)
-	{
-		this.src = src_;
-		this.myapi = api;
-		this.is_music = is_music;
-		this.added_end_listener = false;
-		var self = this;
-		this.outNode = null;
-		this.mediaSourceNode = null;
-		this.panWhenReady = [];		// for web audio API positioned sounds
-		this.seekWhenReady = 0;
-		this.pauseWhenReady = false;
-		if (api === API_WEBAUDIO && is_music && !audRuntime.isiOS)
-		{
-			this.myapi = API_HTML5;
-			this.outNode = createGain();
-		}
-		this.bufferObject = null;
-		var request;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (is_music && audRuntime.isCocoonJs)
-				CocoonJS["App"]["markAsMusic"](src_);
-			this.bufferObject = new Audio();
-			if (api === API_WEBAUDIO)
-			{
-				this.bufferObject.addEventListener("canplay", function ()
-				{
-					self.mediaSourceNode = context["createMediaElementSource"](self.bufferObject);
-					self.mediaSourceNode["connect"](self.outNode);
-				});
-			}
-			this.bufferObject.autoplay = false;	// this is only a source buffer, not an instance
-			this.bufferObject.preload = "auto";
-			this.bufferObject.src = src_;
-			break;
-		case API_WEBAUDIO:
-			request = new XMLHttpRequest();
-			request.open("GET", src_, true);
-			request.responseType = "arraybuffer";
-			request.onload = function () {
-				if (context["decodeAudioData"])
-				{
-					context["decodeAudioData"](request.response, function (buffer) {
-							self.bufferObject = buffer;
-							var p, i, len, a;
-							if (!cr.is_undefined(self.playTagWhenReady))
-							{
-								if (self.panWhenReady.length)
-								{
-									for (i = 0, len = self.panWhenReady.length; i < len; i++)
-									{
-										p = self.panWhenReady[i];
-										a = new C2AudioInstance(self, p.thistag);
-										a.setPannerEnabled(true);
-										if (typeof p.objUid !== "undefined")
-										{
-											p.obj = audRuntime.getObjectByUID(p.objUid);
-											if (!p.obj)
-												continue;
-										}
-										if (p.obj)
-										{
-											a.setPan(p.obj.x, p.obj.y, cr.to_degrees(p.obj.angle), p.ia, p.oa, p.og);
-											a.setObject(p.obj);
-										}
-										else
-										{
-											a.setPan(p.x, p.y, p.a, p.ia, p.oa, p.og);
-										}
-										a.play(self.loopWhenReady, self.volumeWhenReady, self.seekWhenReady);
-										if (self.pauseWhenReady)
-											a.pause();
-										audioInstances.push(a);
-									}
-									self.panWhenReady.length = 0;
-								}
-								else
-								{
-									a = new C2AudioInstance(self, self.playTagWhenReady);
-									a.play(self.loopWhenReady, self.volumeWhenReady, self.seekWhenReady);
-									if (self.pauseWhenReady)
-										a.pause();
-									audioInstances.push(a);
-								}
-							}
-							else if (!cr.is_undefined(self.convolveWhenReady))
-							{
-								var convolveNode = self.convolveWhenReady.convolveNode;
-								convolveNode["normalize"] = self.normalizeWhenReady;
-								convolveNode["buffer"] = buffer;
-							}
-					});
-				}
-				else
-				{
-					self.bufferObject = context["createBuffer"](request.response, false);
-					if (!cr.is_undefined(self.playTagWhenReady))
-					{
-						var a = new C2AudioInstance(self, self.playTagWhenReady);
-						a.play(self.loopWhenReady, self.volumeWhenReady, self.seekWhenReady);
-						if (self.pauseWhenReady)
-							a.pause();
-						audioInstances.push(a);
-					}
-					else if (!cr.is_undefined(self.convolveWhenReady))
-					{
-						var convolveNode = self.convolveWhenReady.convolveNode;
-						convolveNode["normalize"] = self.normalizeWhenReady;
-						convolveNode["buffer"] = self.bufferObject;
-					}
-				}
-			};
-			request.send();
-			break;
-		case API_PHONEGAP:
-			this.bufferObject = true;
-			break;
-		case API_APPMOBI:
-			this.bufferObject = true;
-			break;
-		}
-	};
-	C2AudioBuffer.prototype.isLoaded = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			return this.bufferObject["readyState"] === 4;	// HAVE_ENOUGH_DATA
-		case API_WEBAUDIO:
-			return !!this.bufferObject;			// null until AJAX request completes
-		case API_PHONEGAP:
-			return true;
-		case API_APPMOBI:
-			return true;
-		}
-		return false;
-	};
-	function C2AudioInstance(buffer_, tag_)
-	{
-		var self = this;
-		this.tag = tag_;
-		this.fresh = true;
-		this.stopped = true;
-		this.src = buffer_.src;
-		this.buffer = buffer_;
-		this.myapi = api;
-		this.is_music = buffer_.is_music;
-		this.playbackRate = 1;
-		this.pgended = true;			// for PhoneGap only: ended flag
-		this.resume_me = false;			// make sure resumes when leaving suspend
-		this.is_paused = false;
-		this.resume_position = 0;		// for web audio api to resume from correct playback position
-		this.looping = false;
-		this.is_muted = false;
-		this.is_silent = false;
-		this.volume = 1;
-		this.mutevol = 1;
-		this.startTime = audRuntime.kahanTime.sum;
-		this.gainNode = null;
-		this.pannerNode = null;
-		this.pannerEnabled = false;
-		this.objectTracker = null;
-		this.panX = 0;
-		this.panY = 0;
-		this.panAngle = 0;
-		this.panConeInner = 0;
-		this.panConeOuter = 0;
-		this.panConeOuterGain = 0;
-		this.instanceObject = null;
-		var add_end_listener = false;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.is_music)
-			{
-				this.instanceObject = buffer_.bufferObject;
-				add_end_listener = !buffer_.added_end_listener;
-				buffer_.added_end_listener = true;
-			}
-			else
-			{
-				this.instanceObject = new Audio();
-				this.instanceObject.autoplay = false;
-				this.instanceObject.src = buffer_.bufferObject.src;
-				add_end_listener = true;
-			}
-			if (add_end_listener)
-			{
-				this.instanceObject.addEventListener('ended', function () {
-						audTag = self.tag;
-						self.stopped = true;
-						audRuntime.trigger(cr.plugins_.Audio.prototype.cnds.OnEnded, audInst);
-				});
-			}
-			break;
-		case API_WEBAUDIO:
-			this.gainNode = createGain();
-			this.gainNode["connect"](getDestinationForTag(tag_));
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (buffer_.bufferObject)
-				{
-					this.instanceObject = context["createBufferSource"]();
-					this.instanceObject["buffer"] = buffer_.bufferObject;
-					this.instanceObject["connect"](this.gainNode);
-				}
-			}
-			else
-			{
-				this.instanceObject = this.buffer.bufferObject;		// reference the audio element
-				this.buffer.outNode["connect"](this.gainNode);
-			}
-			break;
-		case API_PHONEGAP:
-			this.instanceObject = new window["Media"](appPath + this.src, null, null, function (status) {
-					if (status === window["Media"]["MEDIA_STOPPED"])
-					{
-						self.pgended = true;
-						self.stopped = true;
-						audTag = self.tag;
-						audRuntime.trigger(cr.plugins_.Audio.prototype.cnds.OnEnded, audInst);
-					}
-			});
-			break;
-		case API_APPMOBI:
-			this.instanceObject = true;
-			break;
-		}
-	};
-	C2AudioInstance.prototype.hasEnded = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			return this.instanceObject.ended;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (!this.fresh && !this.stopped && this.instanceObject["loop"])
-					return false;
-				if (this.is_paused)
-					return false;
-				return (audRuntime.kahanTime.sum - this.startTime) > this.buffer.bufferObject["duration"];
-			}
-			else
-				return this.instanceObject.ended;
-		case API_PHONEGAP:
-			return this.pgended;
-		case API_APPMOBI:
-			true;	// recycling an AppMobi sound does not matter because it will just do another throwaway playSound
-		}
-		return true;
-	};
-	C2AudioInstance.prototype.canBeRecycled = function ()
-	{
-		if (this.fresh || this.stopped)
-			return true;		// not yet used or is not playing
-		return this.hasEnded();
-	};
-	C2AudioInstance.prototype.setPannerEnabled = function (enable_)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		if (!this.pannerEnabled && enable_)
-		{
-			if (!this.pannerNode)
-			{
-				this.pannerNode = context["createPanner"]();
-				if (typeof this.pannerNode["panningModel"] === "number")
-					this.pannerNode["panningModel"] = panningModel;
-				else
-					this.pannerNode["panningModel"] = ["equalpower", "HRTF", "soundfield"][panningModel];
-				if (typeof this.pannerNode["distanceModel"] === "number")
-					this.pannerNode["distanceModel"] = distanceModel;
-				else
-					this.pannerNode["distanceModel"] = ["linear", "inverse", "exponential"][distanceModel];
-				this.pannerNode["refDistance"] = refDistance;
-				this.pannerNode["maxDistance"] = maxDistance;
-				this.pannerNode["rolloffFactor"] = rolloffFactor;
-			}
-			this.gainNode["disconnect"]();
-			this.gainNode["connect"](this.pannerNode);
-			this.pannerNode["connect"](getDestinationForTag(this.tag));
-			this.pannerEnabled = true;
-		}
-		else if (this.pannerEnabled && !enable_)
-		{
-			this.pannerNode["disconnect"]();
-			this.gainNode["disconnect"]();
-			this.gainNode["connect"](getDestinationForTag(this.tag));
-			this.pannerEnabled = false;
-		}
-	};
-	C2AudioInstance.prototype.setPan = function (x, y, angle, innerangle, outerangle, outergain)
-	{
-		if (!this.pannerEnabled || api !== API_WEBAUDIO)
-			return;
-		this.pannerNode["setPosition"](x, y, 0);
-		this.pannerNode["setOrientation"](Math.cos(cr.to_radians(angle)), Math.sin(cr.to_radians(angle)), 0);
-		this.pannerNode["coneInnerAngle"] = innerangle;
-		this.pannerNode["coneOuterAngle"] = outerangle;
-		this.pannerNode["coneOuterGain"] = outergain;
-		this.panX = x;
-		this.panY = y;
-		this.panAngle = angle;
-		this.panConeInner = innerangle;
-		this.panConeOuter = outerangle;
-		this.panConeOuterGain = outergain;
-	};
-	C2AudioInstance.prototype.setObject = function (o)
-	{
-		if (!this.pannerEnabled || api !== API_WEBAUDIO)
-			return;
-		if (!this.objectTracker)
-			this.objectTracker = new ObjectTracker();
-		this.objectTracker.setObject(o);
-	};
-	C2AudioInstance.prototype.tick = function (dt)
-	{
-		if (!this.pannerEnabled || api !== API_WEBAUDIO || !this.objectTracker || !this.objectTracker.hasObject() || !this.isPlaying())
-		{
-			return;
-		}
-		this.objectTracker.tick(dt);
-		this.pannerNode["setPosition"](this.objectTracker.obj.x, this.objectTracker.obj.y, 0);
-		var a = 0;
-		if (typeof this.objectTracker.obj.angle !== "undefined")
-		{
-			a = this.objectTracker.obj.angle;
-			this.pannerNode["setOrientation"](Math.cos(a), Math.sin(a), 0);
-		}
-		this.pannerNode["setVelocity"](this.objectTracker.getVelocityX(), this.objectTracker.getVelocityY(), 0);
-	};
-	C2AudioInstance.prototype.play = function (looping, vol, fromPosition)
-	{
-		var instobj = this.instanceObject;
-		this.looping = looping;
-		this.volume = vol;
-		var seekPos = fromPosition || 0;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (instobj.playbackRate !== 1.0)
-				instobj.playbackRate = 1.0;
-			if (instobj.volume !== vol * masterVolume)
-				instobj.volume = vol * masterVolume;
-			if (instobj.loop !== looping)
-				instobj.loop = looping;
-			if (instobj.muted)
-				instobj.muted = false;
-			if (instobj.currentTime !== seekPos)
-			{
-				try {
-					instobj.currentTime = seekPos;
-				}
-				catch (err)
-				{
-;
-				}
-			}
-			this.instanceObject.play();
-			break;
-		case API_WEBAUDIO:
-			this.muted = false;
-			this.mutevol = 1;
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (!this.fresh)
-				{
-					this.instanceObject = context["createBufferSource"]();
-					this.instanceObject["buffer"] = this.buffer.bufferObject;
-					this.instanceObject["connect"](this.gainNode);
-				}
-				this.instanceObject.loop = looping;
-				this.gainNode["gain"]["value"] = vol * masterVolume;
-				if (seekPos === 0)
-					startSource(this.instanceObject);
-				else
-					startSourceAt(this.instanceObject, seekPos, this.getDuration());
-			}
-			else
-			{
-				if (instobj.playbackRate !== 1.0)
-					instobj.playbackRate = 1.0;
-				if (instobj.loop !== looping)
-					instobj.loop = looping;
-				this.gainNode["gain"]["value"] = vol * masterVolume;
-				if (instobj.currentTime !== seekPos)
-				{
-					try {
-						instobj.currentTime = seekPos;
-					}
-					catch (err)
-					{
-;
-					}
-				}
-				instobj.play();
-			}
-			break;
-		case API_PHONEGAP:
-			if ((!this.fresh && this.stopped) || seekPos !== 0)
-				instobj["seekTo"](seekPos);
-			instobj["play"]();
-			this.pgended = false;
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				AppMobi["context"]["playSound"](this.src);
-			else
-				AppMobi["player"]["playSound"](this.src);
-			break;
-		}
-		this.playbackRate = 1;
-		this.startTime = audRuntime.kahanTime.sum - seekPos;
-		this.fresh = false;
-		this.stopped = false;
-		this.is_paused = false;
-	};
-	C2AudioInstance.prototype.stop = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			if (!this.instanceObject.paused)
-				this.instanceObject.pause();
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-				stopSource(this.instanceObject);
-			else
-			{
-				if (!this.instanceObject.paused)
-					this.instanceObject.pause();
-			}
-			break;
-		case API_PHONEGAP:
-			this.instanceObject["stop"]();
-			break;
-		case API_APPMOBI:
-			break;
-		}
-		this.stopped = true;
-		this.is_paused = false;
-	};
-	C2AudioInstance.prototype.pause = function ()
-	{
-		if (this.fresh || this.stopped || this.hasEnded() || this.is_paused)
-			return;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (!this.instanceObject.paused)
-				this.instanceObject.pause();
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				this.resume_position = this.getPlaybackTime();
-				if (this.looping)
-					this.resume_position = this.resume_position % this.getDuration();
-				stopSource(this.instanceObject);
-			}
-			else
-			{
-				if (!this.instanceObject.paused)
-					this.instanceObject.pause();
-			}
-			break;
-		case API_PHONEGAP:
-			this.instanceObject["pause"]();
-			break;
-		case API_APPMOBI:
-			break;
-		}
-		this.is_paused = true;
-	};
-	C2AudioInstance.prototype.resume = function ()
-	{
-		if (this.fresh || this.stopped || this.hasEnded() || !this.is_paused)
-			return;
-		switch (this.myapi) {
-		case API_HTML5:
-			this.instanceObject.play();
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				this.instanceObject = context["createBufferSource"]();
-				this.instanceObject["buffer"] = this.buffer.bufferObject;
-				this.instanceObject["connect"](this.gainNode);
-				this.instanceObject.loop = this.looping;
-				this.gainNode["gain"]["value"] = masterVolume * this.volume * this.mutevol;
-				this.startTime = audRuntime.kahanTime.sum - this.resume_position;
-				startSourceAt(this.instanceObject, this.resume_position, this.getDuration());
-			}
-			else
-			{
-				this.instanceObject.play();
-			}
-			break;
-		case API_PHONEGAP:
-			this.instanceObject["play"]();
-			break;
-		case API_APPMOBI:
-			break;
-		}
-		this.is_paused = false;
-	};
-	C2AudioInstance.prototype.seek = function (pos)
-	{
-		if (this.fresh || this.stopped || this.hasEnded())
-			return;
-		switch (this.myapi) {
-		case API_HTML5:
-			try {
-				this.instanceObject.currentTime = pos;
-			}
-			catch (e) {}
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (this.is_paused)
-					this.resume_position = pos;
-				else
-				{
-					this.pause();
-					this.resume_position = pos;
-					this.resume();
-				}
-			}
-			else
-			{
-				try {
-					this.instanceObject.currentTime = pos;
-				}
-				catch (e) {}
-			}
-			break;
-		case API_PHONEGAP:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.reconnect = function (toNode)
-	{
-		if (this.myapi !== API_WEBAUDIO)
-			return;
-		if (this.pannerEnabled)
-		{
-			this.pannerNode["disconnect"]();
-			this.pannerNode["connect"](toNode);
-		}
-		else
-		{
-			this.gainNode["disconnect"]();
-			this.gainNode["connect"](toNode);
-		}
-	};
-	C2AudioInstance.prototype.getDuration = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			if (typeof this.instanceObject.duration !== "undefined")
-				return this.instanceObject.duration;
-			else
-				return 0;
-		case API_WEBAUDIO:
-			return this.buffer.bufferObject["duration"];
-		case API_PHONEGAP:
-			return this.instanceObject["getDuration"]();
-		case API_APPMOBI:
-			return 0;
-		}
-		return 0;
-	};
-	C2AudioInstance.prototype.getPlaybackTime = function ()
-	{
-		var duration = this.getDuration();
-		var ret = 0;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (typeof this.instanceObject.currentTime !== "undefined")
-				ret = this.instanceObject.currentTime;
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (this.is_paused)
-					return this.resume_position;
-				else
-					ret = audRuntime.kahanTime.sum - this.startTime;
-			}
-			else if (typeof this.instanceObject.currentTime !== "undefined")
-				ret = this.instanceObject.currentTime;
-			break;
-		case API_PHONEGAP:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-		if (!this.looping && ret > duration)
-			ret = duration;
-		return ret;
-	};
-	C2AudioInstance.prototype.isPlaying = function ()
-	{
-		return !this.is_paused && !this.fresh && !this.stopped && !this.hasEnded();
-	};
-	C2AudioInstance.prototype.setVolume = function (v)
-	{
-		this.volume = v;
-		this.updateVolume();
-	};
-	C2AudioInstance.prototype.updateVolume = function ()
-	{
-		var volToSet = this.volume * masterVolume;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.instanceObject.volume && this.instanceObject.volume !== volToSet)
-				this.instanceObject.volume = volToSet;
-			break;
-		case API_WEBAUDIO:
-			this.gainNode["gain"]["value"] = volToSet * this.mutevol;
-			break;
-		case API_PHONEGAP:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.getVolume = function ()
-	{
-		return this.volume;
-	};
-	C2AudioInstance.prototype.doSetMuted = function (m)
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.instanceObject.muted !== !!m)
-				this.instanceObject.muted = !!m;
-			break;
-		case API_WEBAUDIO:
-			this.mutevol = (m ? 0 : 1);
-			this.gainNode["gain"]["value"] = masterVolume * this.volume * this.mutevol;
-			break;
-		case API_PHONEGAP:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.setMuted = function (m)
-	{
-		this.is_muted = !!m;
-		this.doSetMuted(this.is_muted || this.is_silent);
-	};
-	C2AudioInstance.prototype.setSilent = function (m)
-	{
-		this.is_silent = !!m;
-		this.doSetMuted(this.is_muted || this.is_silent);
-	};
-	C2AudioInstance.prototype.setLooping = function (l)
-	{
-		this.looping = l;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.instanceObject.loop !== !!l)
-				this.instanceObject.loop = !!l;
-			break;
-		case API_WEBAUDIO:
-			if (this.instanceObject.loop !== !!l)
-				this.instanceObject.loop = !!l;
-			break;
-		case API_PHONEGAP:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.setPlaybackRate = function (r)
-	{
-		this.playbackRate = r;
-		this.updatePlaybackRate();
-	};
-	C2AudioInstance.prototype.updatePlaybackRate = function ()
-	{
-		var r = this.playbackRate;
-		if ((timescale_mode === 1 && !this.is_music) || timescale_mode === 2)
-			r *= audRuntime.timescale;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.instanceObject.playbackRate !== r)
-				this.instanceObject.playbackRate = r;
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (this.instanceObject["playbackRate"]["value"] !== r)
-					this.instanceObject["playbackRate"]["value"] = r;
-			}
-			else
-			{
-				if (this.instanceObject.playbackRate !== r)
-					this.instanceObject.playbackRate = r;
-			}
-			break;
-		case API_PHONEGAP:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.setSuspended = function (s)
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			if (s)
-			{
-				if (this.isPlaying())
-				{
-					this.instanceObject["pause"]();
-					this.resume_me = true;
-				}
-				else
-					this.resume_me = false;
-			}
-			else
-			{
-				if (this.resume_me)
-					this.instanceObject["play"]();
-			}
-			break;
-		case API_WEBAUDIO:
-			if (s)
-			{
-				if (this.isPlaying())
-				{
-					if (this.buffer.myapi === API_WEBAUDIO)
-					{
-						this.resume_position = this.getPlaybackTime();
-						if (this.looping)
-							this.resume_position = this.resume_position % this.getDuration();
-						stopSource(this.instanceObject);
-					}
-					else
-						this.instanceObject["pause"]();
-					this.resume_me = true;
-				}
-				else
-					this.resume_me = false;
-			}
-			else
-			{
-				if (this.resume_me)
-				{
-					if (this.buffer.myapi === API_WEBAUDIO)
-					{
-						this.instanceObject = context["createBufferSource"]();
-						this.instanceObject["buffer"] = this.buffer.bufferObject;
-						this.instanceObject["connect"](this.gainNode);
-						this.instanceObject.loop = this.looping;
-						this.gainNode["gain"]["value"] = masterVolume * this.volume * this.mutevol;
-						this.startTime = audRuntime.kahanTime.sum - this.resume_position;
-						startSourceAt(this.instanceObject, this.resume_position, this.getDuration());
-					}
-					else
-					{
-						this.instanceObject["play"]();
-					}
-				}
-			}
-			break;
-		case API_PHONEGAP:
-			if (s)
-			{
-				if (this.isPlaying())
-				{
-					this.instanceObject["pause"]();
-					this.resume_me = true;
-				}
-				else
-					this.resume_me = false;
-			}
-			else
-			{
-				if (this.resume_me)
-					this.instanceObject["play"]();
-			}
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-		audRuntime = this.runtime;
-		audInst = this;
-		this.listenerTracker = null;
-		this.listenerZ = -600;
-		context = null;
-		if (typeof AudioContext !== "undefined")
-		{
-			api = API_WEBAUDIO;
-			context = new AudioContext();
-		}
-		else if (typeof webkitAudioContext !== "undefined")
-		{
-			api = API_WEBAUDIO;
-			context = new webkitAudioContext();
-		}
-		if (this.runtime.isiOS && api === API_WEBAUDIO)
-		{
-			document.addEventListener("touchstart", function () {
-				if (iOShadtouch)
-					return;
-				var buffer = context["createBuffer"](1, 1, 22050);
-				var source = context["createBufferSource"]();
-				source["buffer"] = buffer;
-				source["connect"](context["destination"]);
-				startSource(source);
-				iOShadtouch = true;
-			}, true);
-		}
-		if (api !== API_WEBAUDIO)
-		{
-			if (this.runtime.isPhoneGap)
-				api = API_PHONEGAP;
-			else if (this.runtime.isAppMobi)
-				api = API_APPMOBI;
-		}
-		if (api === API_PHONEGAP)
-		{
-			appPath = location.href;
-			var i = appPath.lastIndexOf("/");
-			if (i > -1)
-				appPath = appPath.substr(0, i + 1);
-			appPath = appPath.replace("file://", "");
-		}
-		if (this.runtime.isSafari && this.runtime.isWindows && typeof Audio === "undefined")
-		{
-			alert("It looks like you're using Safari for Windows without Quicktime.  Audio cannot be played until Quicktime is installed.");
-			this.runtime.DestroyInstance(this);
-		}
-		else
-		{
-			if (this.runtime.isDirectCanvas)
-				useOgg = this.runtime.isAndroid;		// AAC on iOS, OGG on Android
-			else
-			{
-				try {
-					useOgg = !!(new Audio().canPlayType('audio/ogg; codecs="vorbis"'));
-				}
-				catch (e)
-				{
-					useOgg = false;
-				}
-			}
-			switch (api) {
-			case API_HTML5:
-;
-				break;
-			case API_WEBAUDIO:
-;
-				break;
-			case API_PHONEGAP:
-;
-				break;
-			case API_APPMOBI:
-;
-				break;
-			default:
-;
-			}
-			this.runtime.tickMe(this);
-		}
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function ()
-	{
-		timescale_mode = this.properties[0];	// 0 = off, 1 = sounds only, 2 = all
-		panningModel = this.properties[1];		// 0 = equalpower, 1 = hrtf, 3 = soundfield
-		distanceModel = this.properties[2];		// 0 = linear, 1 = inverse, 2 = exponential
-		this.listenerZ = -this.properties[3];
-		refDistance = this.properties[4];
-		maxDistance = this.properties[5];
-		rolloffFactor = this.properties[6];
-		this.listenerTracker = new ObjectTracker();
-		if (api === API_WEBAUDIO)
-		{
-			context["listener"]["speedOfSound"] = this.properties[7];
-			context["listener"]["dopplerFactor"] = this.properties[8];
-			context["listener"]["setPosition"](this.runtime.width / 2, this.runtime.height / 2, this.listenerZ);
-			context["listener"]["setOrientation"](0, 0, 1, 0, -1, 0);
-			window["c2OnAudioMicStream"] = function (localMediaStream, tag)
-			{
-				if (micSource)
-					micSource["disconnect"]();
-				micTag = tag.toLowerCase();
-				micSource = context["createMediaStreamSource"](localMediaStream);
-				micSource["connect"](getDestinationForTag(micTag));
-			};
-		}
-		this.runtime.addSuspendCallback(function(s)
-		{
-			audInst.onSuspend(s);
-		});
-		var self = this;
-		this.runtime.addDestroyCallback(function (inst)
-		{
-			self.onInstanceDestroyed(inst);
-		});
-	};
-	instanceProto.onInstanceDestroyed = function (inst)
-	{
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (a.objectTracker)
-			{
-				if (a.objectTracker.obj === inst)
-				{
-					a.objectTracker.obj = null;
-					if (a.pannerEnabled && a.isPlaying() && a.looping)
-						a.stop();
-				}
-			}
-		}
-		if (this.listenerTracker.obj === inst)
-			this.listenerTracker.obj = null;
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		var o = {
-			"silent": silent,
-			"masterVolume": masterVolume,
-			"listenerZ": this.listenerZ,
-			"listenerUid": this.listenerTracker.hasObject() ? this.listenerTracker.obj.uid : -1,
-			"playing": [],
-			"effects": {}
-		};
-		var playingarr = o["playing"];
-		var i, len, a, d, p, panobj, playbackTime;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (!a.isPlaying())
-				continue;		// no need to save stopped sounds
-			playbackTime = a.getPlaybackTime();
-			if (a.looping)
-				playbackTime = playbackTime % a.getDuration();
-			d = {
-				"tag": a.tag,
-				"buffersrc": a.buffer.src,
-				"is_music": a.is_music,
-				"playbackTime": playbackTime,
-				"volume": a.volume,
-				"looping": a.looping,
-				"muted": a.is_muted,
-				"playbackRate": a.playbackRate,
-				"paused": a.is_paused,
-				"resume_position": a.resume_position
-			};
-			if (a.pannerEnabled)
-			{
-				d["pan"] = {};
-				panobj = d["pan"];
-				if (a.objectTracker && a.objectTracker.hasObject())
-				{
-					panobj["objUid"] = a.objectTracker.obj.uid;
-				}
-				else
-				{
-					panobj["x"] = a.panX;
-					panobj["y"] = a.panY;
-					panobj["a"] = a.panAngle;
-				}
-				panobj["ia"] = a.panConeInner;
-				panobj["oa"] = a.panConeOuter;
-				panobj["og"] = a.panConeOuterGain;
-			}
-			playingarr.push(d);
-		}
-		var fxobj = o["effects"];
-		var fxarr;
-		for (p in effects)
-		{
-			if (effects.hasOwnProperty(p))
-			{
-				fxarr = [];
-				for (i = 0, len = effects[p].length; i < len; i++)
-				{
-					fxarr.push({ "type": effects[p][i].type, "params": effects[p][i].params });
-				}
-				fxobj[p] = fxarr;
-			}
-		}
-		return o;
-	};
-	var objectTrackerUidsToLoad = [];
-	instanceProto.loadFromJSON = function (o)
-	{
-		var setSilent = o["silent"];
-		masterVolume = o["masterVolume"];
-		this.listenerZ = o["listenerZ"];
-		this.listenerTracker.setObject(null);
-		var listenerUid = o["listenerUid"];
-		if (listenerUid !== -1)
-		{
-			this.listenerTracker.loadUid = listenerUid;
-			objectTrackerUidsToLoad.push(this.listenerTracker);
-		}
-		var playingarr = o["playing"];
-		var i, len, d, src, is_music, tag, playbackTime, looping, vol, b, a, p, pan, panObjUid;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			audioInstances[i].stop();
-		}
-		var fxarr, fxtype, fxparams, fx;
-		for (p in effects)
-		{
-			if (effects.hasOwnProperty(p))
-			{
-				for (i = 0, len = effects[p].length; i < len; i++)
-					effects[p][i].remove();
-			}
-		}
-		cr.wipe(effects);
-		for (p in o["effects"])
-		{
-			if (o["effects"].hasOwnProperty(p))
-			{
-				fxarr = o["effects"][p];
-				for (i = 0, len = fxarr.length; i < len; i++)
-				{
-					fxtype = fxarr[i]["type"];
-					fxparams = fxarr[i]["params"];
-					switch (fxtype) {
-					case "filter":
-						addEffectForTag(p, new FilterEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4], fxparams[5]));
-						break;
-					case "delay":
-						addEffectForTag(p, new DelayEffect(fxparams[0], fxparams[1], fxparams[2]));
-						break;
-					case "convolve":
-						src = fxparams[2];
-						b = this.getAudioBuffer(src, false);
-						if (b.bufferObject)
-						{
-							fx = new ConvolveEffect(b.bufferObject, fxparams[0], fxparams[1], src);
-						}
-						else
-						{
-							fx = new ConvolveEffect(null, fxparams[0], fxparams[1], src);
-							b.normalizeWhenReady = fxparams[0];
-							b.convolveWhenReady = fx;
-						}
-						addEffectForTag(p, fx);
-						break;
-					case "flanger":
-						addEffectForTag(p, new FlangerEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4]));
-						break;
-					case "phaser":
-						addEffectForTag(p, new PhaserEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4], fxparams[5]));
-						break;
-					case "gain":
-						addEffectForTag(p, new GainEffect(fxparams[0]));
-						break;
-					case "tremolo":
-						addEffectForTag(p, new TremoloEffect(fxparams[0], fxparams[1]));
-						break;
-					case "ringmod":
-						addEffectForTag(p, new RingModulatorEffect(fxparams[0], fxparams[1]));
-						break;
-					case "distortion":
-						addEffectForTag(p, new DistortionEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4]));
-						break;
-					case "compressor":
-						addEffectForTag(p, new CompressorEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4]));
-						break;
-					case "analyser":
-						addEffectForTag(p, new AnalyserEffect(fxparams[0], fxparams[1]));
-						break;
-					}
-				}
-			}
-		}
-		for (i = 0, len = playingarr.length; i < len; i++)
-		{
-			d = playingarr[i];
-			src = d["buffersrc"];
-			is_music = d["is_music"];
-			tag = d["tag"];
-			playbackTime = d["playbackTime"];
-			looping = d["looping"];
-			vol = d["volume"];
-			pan = d["pan"];
-			panObjUid = (pan && pan.hasOwnProperty("objUid")) ? pan["objUid"] : -1;
-			a = this.getAudioInstance(src, tag, is_music, looping, vol);
-			if (!a)
-			{
-				b = this.getAudioBuffer(src, is_music);
-				b.seekWhenReady = playbackTime;
-				b.pauseWhenReady = d["paused"];
-				if (pan)
-				{
-					if (panObjUid !== -1)
-					{
-						b.panWhenReady.push({ objUid: panObjUid, ia: pan["ia"], oa: pan["oa"], og: pan["og"], thistag: tag });
-					}
-					else
-					{
-						b.panWhenReady.push({ x: pan["x"], y: pan["y"], a: pan["a"], ia: pan["ia"], oa: pan["oa"], og: pan["og"], thistag: tag });
-					}
-				}
-				continue;
-			}
-			a.resume_position = d["resume_position"];
-			a.setPannerEnabled(!!pan);
-			a.play(looping, vol, playbackTime);
-			a.updatePlaybackRate();
-			a.updateVolume();
-			a.doSetMuted(a.is_muted || a.is_silent);
-			if (d["paused"])
-				a.pause();
-			if (d["muted"])
-				a.mute();
-			if (pan)
-			{
-				if (panObjUid !== -1)
-				{
-					a.objectTracker = a.objectTracker || new ObjectTracker();
-					a.objectTracker.loadUid = panObjUid;
-					objectTrackerUidsToLoad.push(a.objectTracker);
-				}
-				else
-				{
-					a.setPan(pan["x"], pan["y"], pan["a"], pan["ia"], pan["oa"], pan["og"]);
-				}
-			}
-		}
-		if (setSilent && !silent)			// setting silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(true);
-			silent = true;
-		}
-		else if (!setSilent && silent)		// setting not silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(false);
-			silent = false;
-		}
-	};
-	instanceProto.afterLoad = function ()
-	{
-		var i, len, ot;
-		for (i = 0, len = objectTrackerUidsToLoad.length; i < len; i++)
-		{
-			ot = objectTrackerUidsToLoad[i];
-			ot.setObject(this.runtime.getObjectByUID(ot.loadUid));
-			ot.loadUid = -1;
-		}
-		objectTrackerUidsToLoad.length = 0;
-	};
-	instanceProto.onSuspend = function (s)
-	{
-		var i, len;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-			audioInstances[i].setSuspended(s);
-	};
-	instanceProto.tick = function ()
-	{
-		var dt = this.runtime.dt;
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			a.tick(dt);
-			if (a.myapi !== API_HTML5 && a.myapi !== API_APPMOBI)
-			{
-				if (!a.fresh && !a.stopped && a.hasEnded())
-				{
-					a.stopped = true;
-					audTag = a.tag;
-					audRuntime.trigger(cr.plugins_.Audio.prototype.cnds.OnEnded, audInst);
-				}
-			}
-			if (timescale_mode !== 0)
-				a.updatePlaybackRate();
-		}
-		var p, arr, f;
-		for (p in effects)
-		{
-			if (effects.hasOwnProperty(p))
-			{
-				arr = effects[p];
-				for (i = 0, len = arr.length; i < len; i++)
-				{
-					f = arr[i];
-					if (f.tick)
-						f.tick();
-				}
-			}
-		}
-		if (api === API_WEBAUDIO && this.listenerTracker.hasObject())
-		{
-			this.listenerTracker.tick(dt);
-			context["listener"]["setPosition"](this.listenerTracker.obj.x, this.listenerTracker.obj.y, this.listenerZ);
-			context["listener"]["setVelocity"](this.listenerTracker.getVelocityX(), this.listenerTracker.getVelocityY(), 0);
-		}
-	};
-	instanceProto.getAudioBuffer = function (src_, is_music)
-	{
-		var i, len, a;
-		for (i = 0, len = audioBuffers.length; i < len; i++)
-		{
-			a = audioBuffers[i];
-			if (a.src === src_)
-				return a;
-		}
-		a = new C2AudioBuffer(src_, is_music);
-		audioBuffers.push(a);
-		return a;
-	};
-	instanceProto.getAudioInstance = function (src_, tag, is_music, looping, vol)
-	{
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (a.src === src_ && (a.canBeRecycled() || is_music))
-			{
-				a.tag = tag;
-				return a;
-			}
-		}
-		var b = this.getAudioBuffer(src_, is_music);
-		if (!b.bufferObject)
-		{
-			if (tag !== "<preload>")
-			{
-				b.playTagWhenReady = tag;
-				b.loopWhenReady = looping;
-				b.volumeWhenReady = vol;
-			}
-			return null;
-		}
-		a = new C2AudioInstance(b, tag);
-		audioInstances.push(a);
-		return a;
-	};
-	var taggedAudio = [];
-	function getAudioByTag(tag)
-	{
-		taggedAudio.length = 0;
-		if (!tag.length)
-		{
-			if (!lastAudio || lastAudio.hasEnded())
-				return;
-			else
-			{
-				taggedAudio.length = 1;
-				taggedAudio[0] = lastAudio;
-				return;
-			}
-		}
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (tag.toLowerCase() === a.tag.toLowerCase())
-				taggedAudio.push(a);
-		}
-	};
-	function reconnectEffects(tag)
-	{
-		var i, len, arr, n, toNode = context["destination"];
-		if (effects.hasOwnProperty(tag))
-		{
-			arr = effects[tag];
-			if (arr.length)
-			{
-				toNode = arr[0].getInputNode();
-				for (i = 0, len = arr.length; i < len; i++)
-				{
-					n = arr[i];
-					if (i + 1 === len)
-						n.connectTo(context["destination"]);
-					else
-						n.connectTo(arr[i + 1].getInputNode());
-				}
-			}
-		}
-		getAudioByTag(tag);
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].reconnect(toNode);
-		if (micSource && micTag === tag)
-		{
-			micSource["disconnect"]();
-			micSource["connect"](toNode);
-		}
-	};
-	function addEffectForTag(tag, fx)
-	{
-		if (!effects.hasOwnProperty(tag))
-			effects[tag] = [fx];
-		else
-			effects[tag].push(fx);
-		reconnectEffects(tag);
-	};
-	function Cnds() {};
-	Cnds.prototype.OnEnded = function (t)
-	{
-		return audTag.toLowerCase() === t.toLowerCase();
-	};
-	Cnds.prototype.PreloadsComplete = function ()
-	{
-		var i, len;
-		for (i = 0, len = audioBuffers.length; i < len; i++)
-		{
-			if (!audioBuffers[i].isLoaded())
-				return false;
-		}
-		return true;
-	};
-	Cnds.prototype.AdvancedAudioSupported = function ()
-	{
-		return api === API_WEBAUDIO;
-	};
-	Cnds.prototype.IsSilent = function ()
-	{
-		return silent;
-	};
-	Cnds.prototype.IsAnyPlaying = function ()
-	{
-		var i, len;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			if (audioInstances[i].isPlaying())
-				return true;
-		}
-		return false;
-	};
-	Cnds.prototype.IsTagPlaying = function (tag)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-		{
-			if (taggedAudio[i].isPlaying())
-				return true;
-		}
-		return false;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.Play = function (file, looping, vol, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-			return;
-		lastAudio.setPannerEnabled(false);
-		lastAudio.play(looping!==0, v);
-	};
-	Acts.prototype.PlayAtPosition = function (file, looping, vol, x_, y_, angle_, innerangle_, outerangle_, outergain_, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ x: x_, y: y_, a: angle_, ia: innerangle_, oa: outerangle_, og: dbToLinear(outergain_), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		lastAudio.setPan(x_, y_, angle_, innerangle_, outerangle_, dbToLinear(outergain_));
-		lastAudio.play(looping!==0, v);
-	};
-	Acts.prototype.PlayAtObject = function (file, looping, vol, obj, innerangle, outerangle, outergain, tag)
-	{
-		if (silent || !obj)
-			return;
-		var inst = obj.getFirstPicked();
-		if (!inst)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ obj: inst, ia: innerangle, oa: outerangle, og: dbToLinear(outergain), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		lastAudio.setPan(inst.x, inst.y, cr.to_degrees(inst.angle), innerangle, outerangle, dbToLinear(outergain));
-		lastAudio.setObject(inst);
-		lastAudio.play(looping!==0, v);
-	};
-	Acts.prototype.PlayByName = function (folder, filename, looping, vol, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-			return;
-		lastAudio.setPannerEnabled(false);
-		lastAudio.play(looping!==0, v);
-	};
-	Acts.prototype.PlayAtPositionByName = function (folder, filename, looping, vol, x_, y_, angle_, innerangle_, outerangle_, outergain_, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ x: x_, y: y_, a: angle_, ia: innerangle_, oa: outerangle_, og: dbToLinear(outergain_), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		lastAudio.setPan(x_, y_, angle_, innerangle_, outerangle_, dbToLinear(outergain_));
-		lastAudio.play(looping!==0, v);
-	};
-	Acts.prototype.PlayAtObjectByName = function (folder, filename, looping, vol, obj, innerangle, outerangle, outergain, tag)
-	{
-		if (silent || !obj)
-			return;
-		var inst = obj.getFirstPicked();
-		if (!inst)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ obj: inst, ia: innerangle, oa: outerangle, og: dbToLinear(outergain), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		lastAudio.setPan(inst.x, inst.y, cr.to_degrees(inst.angle), innerangle, outerangle, dbToLinear(outergain));
-		lastAudio.setObject(inst);
-		lastAudio.play(looping!==0, v);
-	};
-	Acts.prototype.SetLooping = function (tag, looping)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setLooping(looping === 0);
-	};
-	Acts.prototype.SetMuted = function (tag, muted)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setMuted(muted === 0);
-	};
-	Acts.prototype.SetVolume = function (tag, vol)
-	{
-		getAudioByTag(tag);
-		var v = dbToLinear(vol);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setVolume(v);
-	};
-	Acts.prototype.Preload = function (file)
-	{
-		if (silent)
-			return;
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		if (api === API_APPMOBI)
-		{
-			if (this.runtime.isDirectCanvas)
-				AppMobi["context"]["loadSound"](src);
-			else
-				AppMobi["player"]["loadSound"](src);
-			return;
-		}
-		else if (api === API_PHONEGAP)
-		{
-			return;
-		}
-		this.getAudioInstance(src, "<preload>", is_music, false);
-	};
-	Acts.prototype.PreloadByName = function (folder, filename)
-	{
-		if (silent)
-			return;
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		if (api === API_APPMOBI)
-		{
-			if (this.runtime.isDirectCanvas)
-				AppMobi["context"]["loadSound"](src);
-			else
-				AppMobi["player"]["loadSound"](src);
-			return;
-		}
-		else if (api === API_PHONEGAP)
-		{
-			return;
-		}
-		this.getAudioInstance(src, "<preload>", is_music, false);
-	};
-	Acts.prototype.SetPlaybackRate = function (tag, rate)
-	{
-		getAudioByTag(tag);
-		if (rate < 0.0)
-			rate = 0;
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setPlaybackRate(rate);
-	};
-	Acts.prototype.Stop = function (tag)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].stop();
-	};
-	Acts.prototype.SetPaused = function (tag, state)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-		{
-			if (state === 0)
-				taggedAudio[i].pause();
-			else
-				taggedAudio[i].resume();
-		}
-	};
-	Acts.prototype.Seek = function (tag, pos)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-		{
-			taggedAudio[i].seek(pos);
-		}
-	};
-	Acts.prototype.SetSilent = function (s)
-	{
-		var i, len;
-		if (s === 2)					// toggling
-			s = (silent ? 1 : 0);		// choose opposite state
-		if (s === 0 && !silent)			// setting silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(true);
-			silent = true;
-		}
-		else if (s === 1 && silent)		// setting not silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(false);
-			silent = false;
-		}
-	};
-	Acts.prototype.SetMasterVolume = function (vol)
-	{
-		masterVolume = dbToLinear(vol);
-		var i, len;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-			audioInstances[i].updateVolume();
-	};
-	Acts.prototype.AddFilterEffect = function (tag, type, freq, detune, q, gain, mix)
-	{
-		if (api !== API_WEBAUDIO || type < 0 || type >= filterTypes.length)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new FilterEffect(type, freq, detune, q, gain, mix));
-	};
-	Acts.prototype.AddDelayEffect = function (tag, delay, gain, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new DelayEffect(delay, dbToLinear(gain), mix));
-	};
-	Acts.prototype.AddFlangerEffect = function (tag, delay, modulation, freq, feedback, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new FlangerEffect(delay / 1000, modulation / 1000, freq, feedback / 100, mix));
-	};
-	Acts.prototype.AddPhaserEffect = function (tag, freq, detune, q, mod, modfreq, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new PhaserEffect(freq, detune, q, mod, modfreq, mix));
-	};
-	Acts.prototype.AddConvolutionEffect = function (tag, file, norm, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		var doNormalize = (norm === 0);
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		var b = this.getAudioBuffer(src, false);
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		var fx;
-		if (b.bufferObject)
-		{
-			fx = new ConvolveEffect(b.bufferObject, doNormalize, mix, src);
-		}
-		else
-		{
-			fx = new ConvolveEffect(null, doNormalize, mix, src);
-			b.normalizeWhenReady = doNormalize;
-			b.convolveWhenReady = fx;
-		}
-		addEffectForTag(tag, fx);
-	};
-	Acts.prototype.AddGainEffect = function (tag, g)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new GainEffect(dbToLinear(g)));
-	};
-	Acts.prototype.AddMuteEffect = function (tag)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new GainEffect(0));	// re-use gain effect with 0 gain
-	};
-	Acts.prototype.AddTremoloEffect = function (tag, freq, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new TremoloEffect(freq, mix));
-	};
-	Acts.prototype.AddRingModEffect = function (tag, freq, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new RingModulatorEffect(freq, mix));
-	};
-	Acts.prototype.AddDistortionEffect = function (tag, threshold, headroom, drive, makeupgain, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new DistortionEffect(threshold, headroom, drive, makeupgain, mix));
-	};
-	Acts.prototype.AddCompressorEffect = function (tag, threshold, knee, ratio, attack, release)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new CompressorEffect(threshold, knee, ratio, attack / 1000, release / 1000));
-	};
-	Acts.prototype.AddAnalyserEffect = function (tag, fftSize, smoothing)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new AnalyserEffect(fftSize, smoothing));
-	};
-	Acts.prototype.RemoveEffects = function (tag)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		var i, len, arr;
-		if (effects.hasOwnProperty(tag))
-		{
-			arr = effects[tag];
-			if (arr.length)
-			{
-				for (i = 0, len = arr.length; i < len; i++)
-					arr[i].remove();
-				arr.length = 0;
-				reconnectEffects(tag);
-			}
-		}
-	};
-	Acts.prototype.SetEffectParameter = function (tag, index, param, value, ramp, time)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var arr;
-		if (!effects.hasOwnProperty(tag))
-			return;
-		arr = effects[tag];
-		if (index < 0 || index >= arr.length)
-			return;
-		arr[index].setParam(param, value, ramp, time);
-	};
-	Acts.prototype.SetListenerObject = function (obj_)
-	{
-		if (!obj_ || api !== API_WEBAUDIO)
-			return;
-		var inst = obj_.getFirstPicked();
-		if (!inst)
-			return;
-		this.listenerTracker.setObject(inst);
-	};
-	Acts.prototype.SetListenerZ = function (z)
-	{
-		this.listenerZ = z;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Duration = function (ret, tag)
-	{
-		getAudioByTag(tag);
-		if (taggedAudio.length)
-			ret.set_float(taggedAudio[0].getDuration());
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.PlaybackTime = function (ret, tag)
-	{
-		getAudioByTag(tag);
-		if (taggedAudio.length)
-			ret.set_float(taggedAudio[0].getPlaybackTime());
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.Volume = function (ret, tag)
-	{
-		getAudioByTag(tag);
-		if (taggedAudio.length)
-		{
-			var v = taggedAudio[0].getVolume();
-			ret.set_float(linearToDb(v));
-		}
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.MasterVolume = function (ret)
-	{
-		ret.set_float(masterVolume);
-	};
-	Exps.prototype.EffectCount = function (ret, tag)
-	{
-		tag = tag.toLowerCase();
-		var arr = null;
-		if (effects.hasOwnProperty(tag))
-			arr = effects[tag];
-		ret.set_int(arr ? arr.length : 0);
-	};
-	function getAnalyser(tag, index)
-	{
-		var arr = null;
-		if (effects.hasOwnProperty(tag))
-			arr = effects[tag];
-		if (arr && index >= 0 && index < arr.length && arr[index].freqBins)
-			return arr[index];
-		else
-			return null;
-	};
-	Exps.prototype.AnalyserFreqBinCount = function (ret, tag, index)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var analyser = getAnalyser(tag, index);
-		ret.set_int(analyser ? analyser.node["frequencyBinCount"] : 0);
-	};
-	Exps.prototype.AnalyserFreqBinAt = function (ret, tag, index, bin)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		bin = Math.floor(bin);
-		var analyser = getAnalyser(tag, index);
-		if (!analyser)
-			ret.set_float(0);
-		else if (bin < 0 || bin >= analyser.node["frequencyBinCount"])
-			ret.set_float(0);
-		else
-			ret.set_float(analyser.freqBins[bin]);
-	};
-	Exps.prototype.AnalyserPeakLevel = function (ret, tag, index)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var analyser = getAnalyser(tag, index);
-		if (analyser)
-			ret.set_float(analyser.peak);
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.AnalyserRMSLevel = function (ret, tag, index)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var analyser = getAnalyser(tag, index);
-		if (analyser)
-			ret.set_float(analyser.rms);
-		else
-			ret.set_float(0);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.Button = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Button.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Button plugin not supported on this platform - the object will not be created");
-			return;
-		}
-		this.isCheckbox = (this.properties[0] === 1);
-		this.inputElem = document.createElement("input");
-		if (this.isCheckbox)
-			this.elem = document.createElement("label");
-		else
-			this.elem = this.inputElem;
-		this.labelText = null;
-		this.inputElem.type = (this.isCheckbox ? "checkbox" : "button");
-		this.inputElem.id = this.properties[6];
-		jQuery(this.elem).appendTo(this.runtime.canvasdiv ? this.runtime.canvasdiv : "body");
-		if (this.isCheckbox)
-		{
-			jQuery(this.inputElem).appendTo(this.elem);
-			this.labelText = document.createTextNode(this.properties[1]);
-			jQuery(this.elem).append(this.labelText);
-			this.inputElem.checked = (this.properties[7] !== 0);
-			jQuery(this.elem).css("font-family", "sans-serif");
-			jQuery(this.elem).css("display", "inline-block");
-			jQuery(this.elem).css("color", "black");
-		}
-		else
-			this.inputElem.value = this.properties[1];
-		this.elem.title = this.properties[2];
-		this.inputElem.disabled = (this.properties[4] === 0);
-		this.autoFontSize = (this.properties[5] !== 0);
-		if (this.properties[3] === 0)
-		{
-			jQuery(this.elem).hide();
-			this.visible = false;
-		}
-		this.inputElem.onclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.trigger(cr.plugins_.Button.prototype.cnds.OnClicked, self);
-			};
-		})(this);
-		this.elem.addEventListener("touchstart", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchmove", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchend", function (e) {
-			e.stopPropagation();
-		}, false);
-		jQuery(this.elem).mousedown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).mouseup(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keydown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keyup(function (e) {
-			e.stopPropagation();
-		});
-		this.updatePosition();
-		this.runtime.tickMe(this);
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		var o = {
-			"tooltip": this.elem.title,
-			"disabled": !!this.inputElem.disabled
-		};
-		if (this.isCheckbox)
-		{
-			o["checked"] = !!this.inputElem.checked;
-			o["text"] = this.labelText.nodeValue;
-		}
-		else
-		{
-			o["text"] = this.elem.value;
-		}
-		return o;
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.elem.title = o["tooltip"];
-		this.inputElem.disabled = o["disabled"];
-		if (this.isCheckbox)
-		{
-			this.inputElem.checked = o["checked"];
-			this.labelText.nodeValue = o["text"];
-		}
-		else
-		{
-			this.elem.value = o["text"];
-		}
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).remove();
-		this.elem = null;
-	};
-	instanceProto.tick = function ()
-	{
-		this.updatePosition();
-	};
-	instanceProto.updatePosition = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		var left = this.layer.layerToCanvas(this.x, this.y, true);
-		var top = this.layer.layerToCanvas(this.x, this.y, false);
-		var right = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, true);
-		var bottom = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, false);
-		if (!this.visible || !this.layer.visible || right <= 0 || bottom <= 0 || left >= this.runtime.width || top >= this.runtime.height)
-		{
-			jQuery(this.elem).hide();
-			return;
-		}
-		if (left < 1)
-			left = 1;
-		if (top < 1)
-			top = 1;
-		if (right >= this.runtime.width)
-			right = this.runtime.width - 1;
-		if (bottom >= this.runtime.height)
-			bottom = this.runtime.height - 1;
-		jQuery(this.elem).show();
-		var offx = Math.round(left) + jQuery(this.runtime.canvas).offset().left;
-		var offy = Math.round(top) + jQuery(this.runtime.canvas).offset().top;
-		jQuery(this.elem).offset({left: offx, top: offy});
-		jQuery(this.elem).width(Math.round(right - left));
-		jQuery(this.elem).height(Math.round(bottom - top));
-		if (this.autoFontSize)
-			jQuery(this.elem).css("font-size", (this.layer.getScale() - 0.2) + "em");
-	};
-	instanceProto.draw = function(ctx)
-	{
-	};
-	instanceProto.drawGL = function(glw)
-	{
-	};
-	function Cnds() {};
-	Cnds.prototype.OnClicked = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.IsChecked = function ()
-	{
-		return this.isCheckbox && this.inputElem.checked;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetText = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		if (this.isCheckbox)
-			this.labelText.nodeValue = text;
-		else
-			this.elem.value = text;
-	};
-	Acts.prototype.SetTooltip = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.title = text;
-	};
-	Acts.prototype.SetVisible = function (vis)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.visible = (vis !== 0);
-	};
-	Acts.prototype.SetEnabled = function (en)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.inputElem.disabled = (en === 0);
-	};
-	Acts.prototype.SetFocus = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.inputElem.focus();
-	};
-	Acts.prototype.SetBlur = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.inputElem.blur();
-	};
-	Acts.prototype.SetCSSStyle = function (p, v)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).css(p, v);
-	};
-	Acts.prototype.SetChecked = function (c)
-	{
-		if (this.runtime.isDomFree || !this.isCheckbox)
-			return;
-		this.inputElem.checked = (c === 1);
-	};
-	Acts.prototype.ToggleChecked = function ()
-	{
-		if (this.runtime.isDomFree || !this.isCheckbox)
-			return;
-		this.inputElem.checked = !this.inputElem.checked;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	pluginProto.exps = new Exps();
-}());
-;
-;
 cr.plugins_.Function = function(runtime)
 {
 	this.runtime = runtime;
@@ -15630,1090 +12710,6 @@ cr.plugins_.Sprite = function(runtime)
 }());
 ;
 ;
-cr.plugins_.Text = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Text.prototype;
-	pluginProto.onCreate = function ()
-	{
-		pluginProto.acts.SetWidth = function (w)
-		{
-			if (this.width !== w)
-			{
-				this.width = w;
-				this.text_changed = true;	// also recalculate text wrapping
-				this.set_bbox_changed();
-			}
-		};
-	};
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	typeProto.onLostWebGLContext = function ()
-	{
-		if (this.is_family)
-			return;
-		var i, len, inst;
-		for (i = 0, len = this.instances.length; i < len; i++)
-		{
-			inst = this.instances[i];
-			inst.mycanvas = null;
-			inst.myctx = null;
-			inst.mytex = null;
-		}
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-		if (this.recycled)
-			this.lines.length = 0;
-		else
-			this.lines = [];		// for word wrapping
-		this.text_changed = true;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	var requestedWebFonts = {};		// already requested web fonts have an entry here
-	instanceProto.onCreate = function()
-	{
-		this.text = this.properties[0];
-		this.visible = (this.properties[1] === 0);		// 0=visible, 1=invisible
-		this.font = this.properties[2];
-		this.color = this.properties[3];
-		this.halign = this.properties[4];				// 0=left, 1=center, 2=right
-		this.valign = this.properties[5];				// 0=top, 1=center, 2=bottom
-		this.wrapbyword = (this.properties[7] === 0);	// 0=word, 1=character
-		this.lastwidth = this.width;
-		this.lastwrapwidth = this.width;
-		this.lastheight = this.height;
-		this.line_height_offset = this.properties[8];
-		this.facename = "";
-		this.fontstyle = "";
-		var arr = this.font.split(" ");
-		this.ptSize = 0;
-		this.textWidth = 0;
-		this.textHeight = 0;
-		var i;
-		for (i = 0; i < arr.length; i++)
-		{
-			if (arr[i].substr(arr[i].length - 2, 2) === "pt")
-			{
-				this.ptSize = parseInt(arr[i].substr(0, arr[i].length - 2));
-				this.pxHeight = Math.ceil((this.ptSize / 72.0) * 96.0) + 4;	// assume 96dpi...
-				if (i > 0)
-					this.fontstyle = arr[i - 1];
-				this.facename = arr[i + 1];
-				for (i = i + 2; i < arr.length; i++)
-					this.facename += " " + arr[i];
-				break;
-			}
-		}
-		this.mycanvas = null;
-		this.myctx = null;
-		this.mytex = null;
-		this.need_text_redraw = false;
-		this.last_render_tick = this.runtime.tickcount;
-		if (this.recycled)
-			this.rcTex.set(0, 0, 1, 1);
-		else
-			this.rcTex = new cr.rect(0, 0, 1, 1);
-		if (this.runtime.glwrap)
-			this.runtime.tickMe(this);
-;
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return {
-			"t": this.text,
-			"f": this.font,
-			"c": this.color,
-			"ha": this.halign,
-			"va": this.valign,
-			"wr": this.wrapbyword,
-			"lho": this.line_height_offset,
-			"fn": this.facename,
-			"fs": this.fontstyle,
-			"ps": this.ptSize,
-			"pxh": this.pxHeight,
-			"tw": this.textWidth,
-			"th": this.textHeight,
-			"lrt": this.last_render_tick
-		};
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.text = o["t"];
-		this.font = o["f"];
-		this.color = o["c"];
-		this.halign = o["ha"];
-		this.valign = o["va"];
-		this.wrapbyword = o["wr"];
-		this.line_height_offset = o["lho"];
-		this.facename = o["fn"];
-		this.fontstyle = o["fs"];
-		this.ptSize = o["ps"];
-		this.pxHeight = o["pxh"];
-		this.textWidth = o["tw"];
-		this.textHeight = o["th"];
-		this.last_render_tick = o["lrt"];
-		this.text_changed = true;
-		this.lastwidth = this.width;
-		this.lastwrapwidth = this.width;
-		this.lastheight = this.height;
-	};
-	instanceProto.tick = function ()
-	{
-		if (this.runtime.glwrap && this.mytex && (this.runtime.tickcount - this.last_render_tick >= 300))
-		{
-			var layer = this.layer;
-            this.update_bbox();
-            var bbox = this.bbox;
-            if (bbox.right < layer.viewLeft || bbox.bottom < layer.viewTop || bbox.left > layer.viewRight || bbox.top > layer.viewBottom)
-			{
-				this.runtime.glwrap.deleteTexture(this.mytex);
-				this.mytex = null;
-				this.myctx = null;
-				this.mycanvas = null;
-			}
-		}
-	};
-	instanceProto.onDestroy = function ()
-	{
-		this.myctx = null;
-		this.mycanvas = null;
-		if (this.runtime.glwrap && this.mytex)
-			this.runtime.glwrap.deleteTexture(this.mytex);
-		this.mytex = null;
-	};
-	instanceProto.updateFont = function ()
-	{
-		this.font = this.fontstyle + " " + this.ptSize.toString() + "pt " + this.facename;
-		this.text_changed = true;
-		this.runtime.redraw = true;
-	};
-	instanceProto.draw = function(ctx, glmode)
-	{
-		ctx.font = this.font;
-		ctx.textBaseline = "top";
-		ctx.fillStyle = this.color;
-		ctx.globalAlpha = glmode ? 1 : this.opacity;
-		var myscale = 1;
-		if (glmode)
-		{
-			myscale = this.layer.getScale();
-			ctx.save();
-			ctx.scale(myscale, myscale);
-		}
-		if (this.text_changed || this.width !== this.lastwrapwidth)
-		{
-			this.type.plugin.WordWrap(this.text, this.lines, ctx, this.width, this.wrapbyword);
-			this.text_changed = false;
-			this.lastwrapwidth = this.width;
-		}
-		this.update_bbox();
-		var penX = glmode ? 0 : this.bquad.tlx;
-		var penY = glmode ? 0 : this.bquad.tly;
-		if (this.runtime.pixel_rounding)
-		{
-			penX = (penX + 0.5) | 0;
-			penY = (penY + 0.5) | 0;
-		}
-		if (this.angle !== 0 && !glmode)
-		{
-			ctx.save();
-			ctx.translate(penX, penY);
-			ctx.rotate(this.angle);
-			penX = 0;
-			penY = 0;
-		}
-		var endY = penY + this.height;
-		var line_height = this.pxHeight;
-		line_height += (this.line_height_offset * this.runtime.devicePixelRatio);
-		var drawX;
-		var i;
-		if (this.valign === 1)		// center
-			penY += Math.max(this.height / 2 - (this.lines.length * line_height) / 2, 0);
-		else if (this.valign === 2)	// bottom
-			penY += Math.max(this.height - (this.lines.length * line_height) - 2, 0);
-		for (i = 0; i < this.lines.length; i++)
-		{
-			drawX = penX;
-			if (this.halign === 1)		// center
-				drawX = penX + (this.width - this.lines[i].width) / 2;
-			else if (this.halign === 2)	// right
-				drawX = penX + (this.width - this.lines[i].width);
-			ctx.fillText(this.lines[i].text, drawX, penY);
-			penY += line_height;
-			if (penY >= endY - line_height)
-				break;
-		}
-		if (this.angle !== 0 || glmode)
-			ctx.restore();
-		this.last_render_tick = this.runtime.tickcount;
-	};
-	instanceProto.drawGL = function(glw)
-	{
-		if (this.width < 1 || this.height < 1)
-			return;
-		var need_redraw = this.text_changed || this.need_text_redraw;
-		this.need_text_redraw = false;
-		var layer_scale = this.layer.getScale();
-		var layer_angle = this.layer.getAngle();
-		var rcTex = this.rcTex;
-		var floatscaledwidth = layer_scale * this.width;
-		var floatscaledheight = layer_scale * this.height;
-		var scaledwidth = Math.ceil(floatscaledwidth);
-		var scaledheight = Math.ceil(floatscaledheight);
-		var windowWidth = this.runtime.width;
-		var windowHeight = this.runtime.height;
-		var halfw = windowWidth / 2;
-		var halfh = windowHeight / 2;
-		if (!this.myctx)
-		{
-			this.mycanvas = document.createElement("canvas");
-			this.mycanvas.width = scaledwidth;
-			this.mycanvas.height = scaledheight;
-			this.lastwidth = scaledwidth;
-			this.lastheight = scaledheight;
-			need_redraw = true;
-			this.myctx = this.mycanvas.getContext("2d");
-		}
-		if (scaledwidth !== this.lastwidth || scaledheight !== this.lastheight)
-		{
-			this.mycanvas.width = scaledwidth;
-			this.mycanvas.height = scaledheight;
-			if (this.mytex)
-			{
-				glw.deleteTexture(this.mytex);
-				this.mytex = null;
-			}
-			need_redraw = true;
-		}
-		if (need_redraw)
-		{
-			this.myctx.clearRect(0, 0, scaledwidth, scaledheight);
-			this.draw(this.myctx, true);
-			if (!this.mytex)
-				this.mytex = glw.createEmptyTexture(scaledwidth, scaledheight, this.runtime.linearSampling, this.runtime.isMobile);
-			glw.videoToTexture(this.mycanvas, this.mytex, this.runtime.isMobile);
-		}
-		this.lastwidth = scaledwidth;
-		this.lastheight = scaledheight;
-		glw.setTexture(this.mytex);
-		glw.setOpacity(this.opacity);
-		glw.resetModelView();
-		glw.translate(-halfw, -halfh);
-		glw.updateModelView();
-		var q = this.bquad;
-		var tlx = this.layer.layerToCanvas(q.tlx, q.tly, true);
-		var tly = this.layer.layerToCanvas(q.tlx, q.tly, false);
-		var trx = this.layer.layerToCanvas(q.trx, q.try_, true);
-		var try_ = this.layer.layerToCanvas(q.trx, q.try_, false);
-		var brx = this.layer.layerToCanvas(q.brx, q.bry, true);
-		var bry = this.layer.layerToCanvas(q.brx, q.bry, false);
-		var blx = this.layer.layerToCanvas(q.blx, q.bly, true);
-		var bly = this.layer.layerToCanvas(q.blx, q.bly, false);
-		if (this.runtime.pixel_rounding || (this.angle === 0 && layer_angle === 0))
-		{
-			var ox = ((tlx + 0.5) | 0) - tlx;
-			var oy = ((tly + 0.5) | 0) - tly
-			tlx += ox;
-			tly += oy;
-			trx += ox;
-			try_ += oy;
-			brx += ox;
-			bry += oy;
-			blx += ox;
-			bly += oy;
-		}
-		if (this.angle === 0 && layer_angle === 0)
-		{
-			trx = tlx + scaledwidth;
-			try_ = tly;
-			brx = trx;
-			bry = tly + scaledheight;
-			blx = tlx;
-			bly = bry;
-			rcTex.right = 1;
-			rcTex.bottom = 1;
-		}
-		else
-		{
-			rcTex.right = floatscaledwidth / scaledwidth;
-			rcTex.bottom = floatscaledheight / scaledheight;
-		}
-		glw.quadTex(tlx, tly, trx, try_, brx, bry, blx, bly, rcTex);
-		glw.resetModelView();
-		glw.scale(layer_scale, layer_scale);
-		glw.rotateZ(-this.layer.getAngle());
-		glw.translate((this.layer.viewLeft + this.layer.viewRight) / -2, (this.layer.viewTop + this.layer.viewBottom) / -2);
-		glw.updateModelView();
-		this.last_render_tick = this.runtime.tickcount;
-	};
-	var wordsCache = [];
-	pluginProto.TokeniseWords = function (text)
-	{
-		wordsCache.length = 0;
-		var cur_word = "";
-		var ch;
-		var i = 0;
-		while (i < text.length)
-		{
-			ch = text.charAt(i);
-			if (ch === "\n")
-			{
-				if (cur_word.length)
-				{
-					wordsCache.push(cur_word);
-					cur_word = "";
-				}
-				wordsCache.push("\n");
-				++i;
-			}
-			else if (ch === " " || ch === "\t" || ch === "-")
-			{
-				do {
-					cur_word += text.charAt(i);
-					i++;
-				}
-				while (i < text.length && (text.charAt(i) === " " || text.charAt(i) === "\t"));
-				wordsCache.push(cur_word);
-				cur_word = "";
-			}
-			else if (i < text.length)
-			{
-				cur_word += ch;
-				i++;
-			}
-		}
-		if (cur_word.length)
-			wordsCache.push(cur_word);
-	};
-	var linesCache = [];
-	function allocLine()
-	{
-		if (linesCache.length)
-			return linesCache.pop();
-		else
-			return {};
-	};
-	function freeLine(l)
-	{
-		linesCache.push(l);
-	};
-	function freeAllLines(arr)
-	{
-		var i, len;
-		for (i = 0, len = arr.length; i < len; i++)
-		{
-			freeLine(arr[i]);
-		}
-		arr.length = 0;
-	};
-	pluginProto.WordWrap = function (text, lines, ctx, width, wrapbyword)
-	{
-		if (!text || !text.length)
-		{
-			freeAllLines(lines);
-			return;
-		}
-		if (width <= 2.0)
-		{
-			freeAllLines(lines);
-			return;
-		}
-		if (text.length <= 100 && text.indexOf("\n") === -1)
-		{
-			var all_width = ctx.measureText(text).width;
-			if (all_width <= width)
-			{
-				freeAllLines(lines);
-				lines.push(allocLine());
-				lines[0].text = text;
-				lines[0].width = all_width;
-				return;
-			}
-		}
-		this.WrapText(text, lines, ctx, width, wrapbyword);
-	};
-	pluginProto.WrapText = function (text, lines, ctx, width, wrapbyword)
-	{
-		var wordArray;
-		if (wrapbyword)
-		{
-			this.TokeniseWords(text);	// writes to wordsCache
-			wordArray = wordsCache;
-		}
-		else
-			wordArray = text;
-		var cur_line = "";
-		var prev_line;
-		var line_width;
-		var i;
-		var lineIndex = 0;
-		var line;
-		for (i = 0; i < wordArray.length; i++)
-		{
-			if (wordArray[i] === "\n")
-			{
-				if (lineIndex >= lines.length)
-					lines.push(allocLine());
-				line = lines[lineIndex];
-				line.text = cur_line;
-				line.width = ctx.measureText(cur_line).width;
-				lineIndex++;
-				cur_line = "";
-				continue;
-			}
-			prev_line = cur_line;
-			cur_line += wordArray[i];
-			line_width = ctx.measureText(cur_line).width;
-			if (line_width >= width)
-			{
-				if (lineIndex >= lines.length)
-					lines.push(allocLine());
-				line = lines[lineIndex];
-				line.text = prev_line;
-				line.width = ctx.measureText(prev_line).width;
-				lineIndex++;
-				cur_line = wordArray[i];
-				if (!wrapbyword && cur_line === " ")
-					cur_line = "";
-			}
-		}
-		if (cur_line.length)
-		{
-			if (lineIndex >= lines.length)
-				lines.push(allocLine());
-			line = lines[lineIndex];
-			line.text = cur_line;
-			line.width = ctx.measureText(cur_line).width;
-			lineIndex++;
-		}
-		for (i = lineIndex; i < lines.length; i++)
-			freeLine(lines[i]);
-		lines.length = lineIndex;
-	};
-	function Cnds() {};
-	Cnds.prototype.CompareText = function(text_to_compare, case_sensitive)
-	{
-		if (case_sensitive)
-			return this.text == text_to_compare;
-		else
-			return this.text.toLowerCase() == text_to_compare.toLowerCase();
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetText = function(param)
-	{
-		if (cr.is_number(param) && param < 1e9)
-			param = Math.round(param * 1e10) / 1e10;	// round to nearest ten billionth - hides floating point errors
-		var text_to_set = param.toString();
-		if (this.text !== text_to_set)
-		{
-			this.text = text_to_set;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.AppendText = function(param)
-	{
-		if (cr.is_number(param))
-			param = Math.round(param * 1e10) / 1e10;	// round to nearest ten billionth - hides floating point errors
-		var text_to_append = param.toString();
-		if (text_to_append)	// not empty
-		{
-			this.text += text_to_append;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetFontFace = function (face_, style_)
-	{
-		var newstyle = "";
-		switch (style_) {
-		case 1: newstyle = "bold"; break;
-		case 2: newstyle = "italic"; break;
-		case 3: newstyle = "bold italic"; break;
-		}
-		if (face_ === this.facename && newstyle === this.fontstyle)
-			return;		// no change
-		this.facename = face_;
-		this.fontstyle = newstyle;
-		this.updateFont();
-	};
-	Acts.prototype.SetFontSize = function (size_)
-	{
-		if (this.ptSize === size_)
-			return;
-		this.ptSize = size_;
-		this.pxHeight = Math.ceil((this.ptSize / 72.0) * 96.0) + 4;	// assume 96dpi...
-		this.updateFont();
-	};
-	Acts.prototype.SetFontColor = function (rgb)
-	{
-		var newcolor = "rgb(" + cr.GetRValue(rgb).toString() + "," + cr.GetGValue(rgb).toString() + "," + cr.GetBValue(rgb).toString() + ")";
-		if (newcolor === this.color)
-			return;
-		this.color = newcolor;
-		this.need_text_redraw = true;
-		this.runtime.redraw = true;
-	};
-	Acts.prototype.SetWebFont = function (familyname_, cssurl_)
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Text plugin: 'Set web font' not supported on this platform - the action has been ignored");
-			return;		// DC todo
-		}
-		var self = this;
-		var refreshFunc = (function () {
-							self.runtime.redraw = true;
-							self.text_changed = true;
-						});
-		if (requestedWebFonts.hasOwnProperty(cssurl_))
-		{
-			var newfacename = "'" + familyname_ + "'";
-			if (this.facename === newfacename)
-				return;	// no change
-			this.facename = newfacename;
-			this.updateFont();
-			for (var i = 1; i < 10; i++)
-			{
-				setTimeout(refreshFunc, i * 100);
-				setTimeout(refreshFunc, i * 1000);
-			}
-			return;
-		}
-		var wf = document.createElement("link");
-		wf.href = cssurl_;
-		wf.rel = "stylesheet";
-		wf.type = "text/css";
-		wf.onload = refreshFunc;
-		document.getElementsByTagName('head')[0].appendChild(wf);
-		requestedWebFonts[cssurl_] = true;
-		this.facename = "'" + familyname_ + "'";
-		this.updateFont();
-		for (var i = 1; i < 10; i++)
-		{
-			setTimeout(refreshFunc, i * 100);
-			setTimeout(refreshFunc, i * 1000);
-		}
-;
-	};
-	Acts.prototype.SetEffect = function (effect)
-	{
-		this.compositeOp = cr.effectToCompositeOp(effect);
-		cr.setGLBlend(this, effect, this.runtime.gl);
-		this.runtime.redraw = true;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Text = function(ret)
-	{
-		ret.set_string(this.text);
-	};
-	Exps.prototype.FaceName = function (ret)
-	{
-		ret.set_string(this.facename);
-	};
-	Exps.prototype.FaceSize = function (ret)
-	{
-		ret.set_int(this.ptSize);
-	};
-	Exps.prototype.TextWidth = function (ret)
-	{
-		var w = 0;
-		var i, len, x;
-		for (i = 0, len = this.lines.length; i < len; i++)
-		{
-			x = this.lines[i].width;
-			if (w < x)
-				w = x;
-		}
-		ret.set_int(w);
-	};
-	Exps.prototype.TextHeight = function (ret)
-	{
-		ret.set_int(this.lines.length * this.pxHeight);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.TextBox = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.TextBox.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	var elemTypes = ["text", "password", "email", "number", "tel", "url"];
-	if (navigator.userAgent.indexOf("MSIE 9") > -1)
-	{
-		elemTypes[2] = "text";
-		elemTypes[3] = "text";
-		elemTypes[4] = "text";
-		elemTypes[5] = "text";
-	}
-	instanceProto.onCreate = function()
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Textbox plugin not supported on this platform - the object will not be created");
-			return;
-		}
-		if (this.properties[7] === 6)	// textarea
-		{
-			this.elem = document.createElement("textarea");
-			jQuery(this.elem).css("resize", "none");
-		}
-		else
-		{
-			this.elem = document.createElement("input");
-			this.elem.type = elemTypes[this.properties[7]];
-		}
-		this.elem.id = this.properties[9];
-		jQuery(this.elem).appendTo(this.runtime.canvasdiv ? this.runtime.canvasdiv : "body");
-		this.elem["autocomplete"] = "off";
-		this.elem.value = this.properties[0];
-		this.elem["placeholder"] = this.properties[1];
-		this.elem.title = this.properties[2];
-		this.elem.disabled = (this.properties[4] === 0);
-		this.elem["readOnly"] = (this.properties[5] === 1);
-		this.elem["spellcheck"] = (this.properties[6] === 1);
-		this.autoFontSize = (this.properties[8] !== 0);
-		if (this.properties[3] === 0)
-		{
-			jQuery(this.elem).hide();
-			this.visible = false;
-		}
-		var onchangetrigger = (function (self) {
-			return function() {
-				self.runtime.trigger(cr.plugins_.TextBox.prototype.cnds.OnTextChanged, self);
-			};
-		})(this);
-		this.elem["oninput"] = onchangetrigger;
-		if (navigator.userAgent.indexOf("MSIE") !== -1)
-			this.elem["oncut"] = onchangetrigger;
-		this.elem.onclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.trigger(cr.plugins_.TextBox.prototype.cnds.OnClicked, self);
-			};
-		})(this);
-		this.elem.ondblclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.trigger(cr.plugins_.TextBox.prototype.cnds.OnDoubleClicked, self);
-			};
-		})(this);
-		this.elem.addEventListener("touchstart", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchmove", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchend", function (e) {
-			e.stopPropagation();
-		}, false);
-		jQuery(this.elem).mousedown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).mouseup(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keydown(function (e) {
-			if (e.which !== 13 && e.which != 27)	// allow enter and escape
-				e.stopPropagation();
-		});
-		jQuery(this.elem).keyup(function (e) {
-			if (e.which !== 13 && e.which != 27)	// allow enter and escape
-				e.stopPropagation();
-		});
-		this.updatePosition();
-		this.runtime.tickMe(this);
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return {
-			"text": this.elem.value,
-			"placeholder": this.elem.placeholder,
-			"tooltip": this.elem.title,
-			"disabled": !!this.elem.disabled,
-			"readonly": !!this.elem.readOnly,
-			"spellcheck": !!this.elem["spellcheck"]
-		};
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.elem.value = o["text"];
-		this.elem.placeholder = o["placeholder"];
-		this.elem.title = o["tooltip"];
-		this.elem.disabled = o["disabled"];
-		this.elem.readOnly = o["readonly"];
-		this.elem["spellcheck"] = o["spellcheck"];
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.isDomFree)
-				return;
-		jQuery(this.elem).remove();
-		this.elem = null;
-	};
-	instanceProto.tick = function ()
-	{
-		this.updatePosition();
-	};
-	instanceProto.updatePosition = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		var left = this.layer.layerToCanvas(this.x, this.y, true);
-		var top = this.layer.layerToCanvas(this.x, this.y, false);
-		var right = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, true);
-		var bottom = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, false);
-		if (!this.visible || !this.layer.visible || right <= 0 || bottom <= 0 || left >= this.runtime.width || top >= this.runtime.height)
-		{
-			jQuery(this.elem).hide();
-			return;
-		}
-		if (left < 1)
-			left = 1;
-		if (top < 1)
-			top = 1;
-		if (right >= this.runtime.width)
-			right = this.runtime.width - 1;
-		if (bottom >= this.runtime.height)
-			bottom = this.runtime.height - 1;
-		jQuery(this.elem).show();
-		var offx = Math.round(left) + jQuery(this.runtime.canvas).offset().left;
-		var offy = Math.round(top) + jQuery(this.runtime.canvas).offset().top;
-		jQuery(this.elem).offset({left: offx, top: offy});
-		jQuery(this.elem).width(Math.round(right - left));
-		jQuery(this.elem).height(Math.round(bottom - top));
-		if (this.autoFontSize)
-			jQuery(this.elem).css("font-size", (this.layer.getScale() - 0.2) + "em");
-	};
-	instanceProto.draw = function(ctx)
-	{
-	};
-	instanceProto.drawGL = function(glw)
-	{
-	};
-	function Cnds() {};
-	Cnds.prototype.CompareText = function (text, case_)
-	{
-		if (this.runtime.isDomFree)
-			return false;
-		if (case_ === 0)	// insensitive
-			return this.elem.value.toLowerCase() === text.toLowerCase();
-		else
-			return this.elem.value === text;
-	};
-	Cnds.prototype.OnTextChanged = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnClicked = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnDoubleClicked = function ()
-	{
-		return true;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetText = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.value = text;
-	};
-	Acts.prototype.SetPlaceholder = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.placeholder = text;
-	};
-	Acts.prototype.SetTooltip = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.title = text;
-	};
-	Acts.prototype.SetVisible = function (vis)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.visible = (vis !== 0);
-	};
-	Acts.prototype.SetEnabled = function (en)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.disabled = (en === 0);
-	};
-	Acts.prototype.SetReadOnly = function (ro)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.readOnly = (ro === 0);
-	};
-	Acts.prototype.SetFocus = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.focus();
-	};
-	Acts.prototype.SetBlur = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.blur();
-	};
-	Acts.prototype.SetCSSStyle = function (p, v)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).css(p, v);
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Text = function (ret)
-	{
-		if (this.runtime.isDomFree)
-		{
-			ret.set_string("");
-			return;
-		}
-		ret.set_string(this.elem.value);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.TiledBg = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.TiledBg.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-		if (this.is_family)
-			return;
-		this.texture_img = new Image();
-		this.texture_img.src = this.texture_file;
-		this.texture_img.cr_filesize = this.texture_filesize;
-		this.runtime.wait_for_textures.push(this.texture_img);
-		this.pattern = null;
-		this.webGL_texture = null;
-	};
-	typeProto.onLostWebGLContext = function ()
-	{
-		if (this.is_family)
-			return;
-		this.webGL_texture = null;
-	};
-	typeProto.onRestoreWebGLContext = function ()
-	{
-		if (this.is_family || !this.instances.length)
-			return;
-		if (!this.webGL_texture)
-		{
-			this.webGL_texture = this.runtime.glwrap.loadTexture(this.texture_img, true, this.runtime.linearSampling, this.texture_pixelformat);
-		}
-		var i, len;
-		for (i = 0, len = this.instances.length; i < len; i++)
-			this.instances[i].webGL_texture = this.webGL_texture;
-	};
-	typeProto.unloadTextures = function ()
-	{
-		if (this.is_family || this.instances.length)
-			return;
-		if (this.runtime.glwrap)
-		{
-			if (this.webGL_texture)
-			{
-				this.runtime.glwrap.deleteTexture(this.webGL_texture);
-				this.webGL_texture = null;
-			}
-		}
-		else
-		{
-			if (this.texture_img["hintUnload"])
-				this.texture_img["hintUnload"]();
-		}
-	};
-	typeProto.preloadCanvas2D = function (ctx)
-	{
-		ctx.drawImage(this.texture_img, 0, 0);
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		this.visible = (this.properties[0] === 0);							// 0=visible, 1=invisible
-		this.rcTex = new cr.rect(0, 0, 0, 0);
-		this.has_own_texture = false;										// true if a texture loaded in from URL
-		this.texture_img = this.type.texture_img;
-		if (this.runtime.glwrap)
-		{
-			if (!this.type.webGL_texture)
-			{
-				this.type.webGL_texture = this.runtime.glwrap.loadTexture(this.type.texture_img, true, this.runtime.linearSampling, this.type.texture_pixelformat);
-			}
-			this.webGL_texture = this.type.webGL_texture;
-		}
-		else
-		{
-			if (this.texture_img["hintLoad"])
-				this.texture_img["hintLoad"]();
-			if (!this.type.pattern)
-				this.type.pattern = this.runtime.ctx.createPattern(this.type.texture_img, "repeat");
-			this.pattern = this.type.pattern;
-		}
-	};
-	instanceProto.afterLoad = function ()
-	{
-		this.has_own_texture = false;
-		this.texture_img = this.type.texture_img;
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.glwrap && this.has_own_texture && this.webGL_texture)
-		{
-			this.runtime.glwrap.deleteTexture(this.webGL_texture);
-			this.webGL_texture = null;
-		}
-	};
-	instanceProto.draw = function(ctx)
-	{
-		ctx.globalAlpha = this.opacity;
-		ctx.save();
-		ctx.fillStyle = this.pattern;
-		var myx = this.x;
-		var myy = this.y;
-		if (this.runtime.pixel_rounding)
-		{
-			myx = (myx + 0.5) | 0;
-			myy = (myy + 0.5) | 0;
-		}
-		var drawX = -(this.hotspotX * this.width);
-		var drawY = -(this.hotspotY * this.height);
-		var offX = drawX % this.texture_img.width;
-		var offY = drawY % this.texture_img.height;
-		if (offX < 0)
-			offX += this.texture_img.width;
-		if (offY < 0)
-			offY += this.texture_img.height;
-		ctx.translate(myx, myy);
-		ctx.rotate(this.angle);
-		ctx.translate(offX, offY);
-		ctx.fillRect(drawX - offX,
-					 drawY - offY,
-					 this.width,
-					 this.height);
-		ctx.restore();
-	};
-	instanceProto.drawGL = function(glw)
-	{
-		glw.setTexture(this.webGL_texture);
-		glw.setOpacity(this.opacity);
-		var rcTex = this.rcTex;
-		rcTex.right = this.width / this.texture_img.width;
-		rcTex.bottom = this.height / this.texture_img.height;
-		var q = this.bquad;
-		if (this.runtime.pixel_rounding)
-		{
-			var ox = ((this.x + 0.5) | 0) - this.x;
-			var oy = ((this.y + 0.5) | 0) - this.y;
-			glw.quadTex(q.tlx + ox, q.tly + oy, q.trx + ox, q.try_ + oy, q.brx + ox, q.bry + oy, q.blx + ox, q.bly + oy, rcTex);
-		}
-		else
-			glw.quadTex(q.tlx, q.tly, q.trx, q.try_, q.brx, q.bry, q.blx, q.bly, rcTex);
-	};
-	function Cnds() {};
-	Cnds.prototype.OnURLLoaded = function ()
-	{
-		return true;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetEffect = function (effect)
-	{
-		this.compositeOp = cr.effectToCompositeOp(effect);
-		cr.setGLBlend(this, effect, this.runtime.gl);
-		this.runtime.redraw = true;
-	};
-	Acts.prototype.LoadURL = function (url_)
-	{
-		var img = new Image();
-		var self = this;
-		img.onload = function ()
-		{
-			self.texture_img = img;
-			if (self.runtime.glwrap)
-			{
-				if (self.has_own_texture && self.webGL_texture)
-					self.runtime.glwrap.deleteTexture(self.webGL_texture);
-				self.webGL_texture = self.runtime.glwrap.loadTexture(img, true, self.runtime.linearSampling);
-			}
-			else
-			{
-				self.pattern = self.runtime.ctx.createPattern(img, "repeat");
-			}
-			self.has_own_texture = true;
-			self.runtime.redraw = true;
-			self.runtime.trigger(cr.plugins_.TiledBg.prototype.cnds.OnURLLoaded, self);
-		};
-		if (url_.substr(0, 5) !== "data:")
-			img.crossOrigin = 'anonymous';
-		img.src = url_;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	pluginProto.exps = new Exps();
-}());
-;
-;
 cr.plugins_.Touch = function(runtime)
 {
 	this.runtime = runtime;
@@ -17663,241 +13659,6 @@ cr.plugins_.Touch = function(runtime)
 	};
 	pluginProto.exps = new Exps();
 }());
-;
-;
-cr.plugins_.UserMedia = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.UserMedia.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	typeProto.onRestoreWebGLContext = function ()
-	{
-		if (this.is_family || !this.instances.length)
-			return;
-		var i, len, inst;
-		for (i = 0, len = this.instances.length; i < len; i++)
-		{
-			inst = this.instances[i];
-			if (inst.video_active && inst.v.videoWidth >= 0 && inst.v.videoHeight >= 0)
-			{
-				inst.webGL_texture = this.runtime.glwrap.createEmptyTexture(inst.v.videoWidth, inst.v.videoHeight, this.runtime.linearSampling);
-			}
-		}
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	var c2getUserMedia = navigator["getUserMedia"] || navigator["webkitGetUserMedia"] ||
-            navigator["mozGetUserMedia"] || navigator["msGetUserMedia"];
-	var c2URL = window["URL"] || window["webkitURL"] || window["mozURL"] || window["msURL"];
-	var isRequesting = false;
-	var CJS_CAMWIDTH = 640;
-	var CJS_CAMHEIGHT = 480;
-	instanceProto.onCreate = function()
-	{
-		var self = this;
-		this.v = document.createElement("video");
-		this.v.autoplay = true;
-		this.v.addEventListener("canplaythrough", function ()
-		{
-			if (self.video_active)
-				self.video_ready = true;
-		});
-		cr.setGLBlend(this, 0, this.runtime.gl);		// normal alpha blend
-		this.video_active = false;
-		this.audio_active = false;
-		this.media_stream = null;
-		this.runtime.tickMe(this);
-		this.snapshot_data = "";
-		this.webGL_texture = null;
-		this.lastDecodedFrame = -1;
-		this.video_ready = false;
-	};
-	instanceProto.onDestroy = function()
-	{
-		if (this.media_stream)
-		{
-			this.media_stream.stop();
-			this.media_stream = null;
-			this.video_active = false;
-			this.video_ready = false;
-			this.audio_active = false;
-		}
-		if (this.runtime.glwrap && this.webGL_texture)
-		{
-			this.runtime.glwrap.deleteTexture(this.webGL_texture);
-			this.webGL_texture = null;
-		}
-	};
-	instanceProto.tick = function ()
-	{
-		if (this.video_active && this.video_ready)
-			this.runtime.redraw = true;
-	};
-	instanceProto.draw = function(ctx)
-	{
-		ctx.globalAlpha = this.opacity;
-		ctx.save();
-		ctx.fillStyle = "#000";
-		ctx.fillRect(this.x, this.y, this.width, this.height);
-		if (this.video_active && this.video_ready)
-		{
-			try {
-				ctx.drawImage(this.v, this.x, this.y, this.width, this.height);
-			}
-			catch (e) {}
-		}
-		ctx.restore();
-	};
-	instanceProto.drawGL = function (glw)
-	{
-		glw.setBlend(this.srcBlend, this.destBlend);
-		glw.setOpacity(this.opacity);
-		var q = this.bquad;
-		if (!this.video_active || !this.video_ready || this.v.videoWidth <= 0 || this.v.videoHeight <= 0)
-		{
-			glw.setTexture(null);
-			glw.quad(q.tlx, q.tly, q.trx, q.try_, q.brx, q.bry, q.blx, q.bly);
-			return;
-		}
-		if (!this.webGL_texture)
-		{
-			this.webGL_texture = glw.createEmptyTexture(this.v.videoWidth, this.v.videoHeight, this.runtime.linearSampling);
-		}
-		var framecount = this.v["webkitDecodedFrameCount"] || this.v["mozParsedFrames"];
-		var updatetexture = false;
-		if (!framecount)
-			updatetexture = true;
-		else if (framecount > this.lastDecodedFrame)
-		{
-			updatetexture = true;
-			this.lastDecodedFrame = framecount;
-		}
-		if (updatetexture)
-		{
-			glw.videoToTexture(this.v, this.webGL_texture, this.runtime.linearSampling);
-		}
-		glw.setTexture(this.webGL_texture);
-		glw.quad(q.tlx, q.tly, q.trx, q.try_, q.brx, q.bry, q.blx, q.bly);
-	};
-	function Cnds() {};
-	Cnds.prototype.OnApproved = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnDeclined = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.SupportsUserMedia = function ()
-	{
-		return !!c2getUserMedia;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.RequestCamera = function ()
-	{
-		if (isRequesting || !c2getUserMedia)
-			return;			// already has info bar up or user media not supported
-		isRequesting = true;
-		var self = this;
-		c2getUserMedia.call(navigator, {"video": true},
-			function (localMediaStream)		// success
-			{
-				self.media_stream = localMediaStream;
-				self.video_ready = false;		// wait for canplaythrough event before rendering
-				self.v.src = c2URL.createObjectURL(localMediaStream);
-				self.video_active = true;
-				isRequesting = false;
-				self.lastDecodedFrame = -1;
-				if (self.runtime.glwrap && self.webGL_texture)
-				{
-					self.runtime.glwrap.deleteTexture(self.webGL_texture);
-					self.webGL_texture = null;
-				}
-				self.runtime.trigger(cr.plugins_.UserMedia.prototype.cnds.OnApproved, self);
-			},
-			function ()						// fail
-			{
-				isRequesting = false;
-				self.runtime.trigger(cr.plugins_.UserMedia.prototype.cnds.OnDeclined, self);
-			});
-	};
-	Acts.prototype.RequestMic = function (tag)
-	{
-		if (isRequesting || !c2getUserMedia)
-			return;			// already has info bar up or user media not supported
-		isRequesting = true;
-		var self = this;
-		c2getUserMedia.call(navigator, {"audio": true},
-			function (localMediaStream)		// success
-			{
-				self.media_stream = localMediaStream;
-				if (window["c2OnAudioMicStream"])
-					window["c2OnAudioMicStream"](localMediaStream, tag);
-				self.audio_active = true;
-				isRequesting = false;
-				self.runtime.trigger(cr.plugins_.UserMedia.prototype.cnds.OnApproved, self);
-			},
-			function ()						// fail
-			{
-				isRequesting = false;
-				self.runtime.trigger(cr.plugins_.UserMedia.prototype.cnds.OnDeclined, self);
-			});
-	};
-	Acts.prototype.Stop = function ()
-	{
-		if (this.media_stream)
-		{
-			this.media_stream.stop();
-			this.media_stream = null;
-			this.video_active = false;
-			this.video_ready = false;
-			this.audio_active = false;
-		}
-	};
-	Acts.prototype.Snapshot = function (format_, quality_)
-	{
-		if (this.video_active && this.video_ready)
-		{
-			var tmpcanvas = document.createElement("canvas");
-			tmpcanvas.width = this.v.videoWidth;
-			tmpcanvas.height = this.v.videoHeight;
-			var tmpctx = tmpcanvas.getContext("2d");
-			tmpctx.drawImage(this.v, 0, 0, this.v.videoWidth, this.v.videoHeight);
-			this.snapshot_data = tmpcanvas.toDataURL(format_ === 0 ? "image/png" : "image/jpeg", quality_ / 100);
-		}
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.VideoWidth = function (ret)
-	{
-		ret.set_int(this.v.videoWidth);
-	};
-	Exps.prototype.VideoHeight = function (ret)
-	{
-		ret.set_int(this.v.videoHeight);
-	};
-	Exps.prototype.SnapshotURL = function (ret)
-	{
-		ret.set_string(this.snapshot_data);
-	};
-	pluginProto.exps = new Exps();
-}());
 /**
  * flood fill algorithm
  * image_data is an array with pixel information as provided in canvas_context.data
@@ -18841,42 +14602,6 @@ cr.getProjectModel = function() { return [
 		false
 	]
 ,	[
-		cr.plugins_.Text,
-		false,
-		true,
-		true,
-		true,
-		true,
-		true,
-		true,
-		true,
-		false
-	]
-,	[
-		cr.plugins_.TextBox,
-		false,
-		true,
-		true,
-		true,
-		false,
-		false,
-		false,
-		false,
-		false
-	]
-,	[
-		cr.plugins_.TiledBg,
-		false,
-		true,
-		true,
-		true,
-		true,
-		true,
-		true,
-		true,
-		true
-	]
-,	[
 		cr.plugins_.Touch,
 		true,
 		false,
@@ -18889,47 +14614,11 @@ cr.getProjectModel = function() { return [
 		false
 	]
 ,	[
-		cr.plugins_.UserMedia,
-		false,
-		true,
-		true,
-		true,
-		false,
-		true,
-		true,
-		true,
-		false
-	]
-,	[
 		cr.plugins_.Arr,
 		false,
 		false,
 		false,
 		false,
-		false,
-		false,
-		false,
-		false,
-		false
-	]
-,	[
-		cr.plugins_.Audio,
-		true,
-		false,
-		false,
-		false,
-		false,
-		false,
-		false,
-		false,
-		false
-	]
-,	[
-		cr.plugins_.Button,
-		false,
-		true,
-		true,
-		true,
 		false,
 		false,
 		false,
@@ -18966,35 +14655,6 @@ cr.getProjectModel = function() { return [
 			1,
 			0,
 			false,
-			6385907613782173,
-			[
-				["images/box-sheet0.png", 398, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],0]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		8290344238967625,
-		[]
-	]
-,	[
-		"t1",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
 			9264387773032696,
 			[
 				["images/back-sheet0.png", 6832, 0, 0, 840, 192, 1, 0.50119, 0.5,[],[-0.492857,-0.463542,-0.00119048,-0.5,0.490476,-0.463542,0.490476,0.463542,-0.00119048,0.5,-0.492857,0.463542],0]
@@ -19009,7 +14669,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t2",
+		"t1",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19038,36 +14698,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t3",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
-			4184299391591496,
-			[
-				["images/sprite3-sheet0.png", 169, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],3]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		8948584324219903,
-		[]
-	]
-,	[
-		"t4",
+		"t2",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19102,23 +14733,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t5",
-		cr.plugins_.TextBox,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		7887090074558876,
-		[]
-	]
-,	[
-		"t6",
+		"t3",
 		cr.plugins_.Function,
 		false,
 		[],
@@ -19135,68 +14750,7 @@ cr.getProjectModel = function() { return [
 		,[]
 	]
 ,	[
-		"t7",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
-			9261756131776815,
-			[
-				["images/sprite-sheet0.png", 156, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],1]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		8883798452862491,
-		[]
-	]
-,	[
-		"t8",
-		cr.plugins_.TextBox,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		6481395520432261,
-		[]
-	]
-,	[
-		"t9",
-		cr.plugins_.Text,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		1562941541919392,
-		[]
-	]
-,	[
-		"t10",
+		"t4",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19225,7 +14779,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t11",
+		"t5",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19254,7 +14808,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t12",
+		"t6",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19288,23 +14842,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t13",
-		cr.plugins_.Text,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		6133711878340443,
-		[]
-	]
-,	[
-		"t14",
+		"t7",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19338,39 +14876,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t15",
-		cr.plugins_.Button,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		4615071143822559,
-		[]
-	]
-,	[
-		"t16",
-		cr.plugins_.Button,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		6483549576702581,
-		[]
-	]
-,	[
-		"t17",
+		"t8",
 		cr.plugins_.Touch,
 		false,
 		[],
@@ -19387,7 +14893,7 @@ cr.getProjectModel = function() { return [
 		,[1]
 	]
 ,	[
-		"t18",
+		"t9",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19416,7 +14922,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t19",
+		"t10",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19445,36 +14951,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t20",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
-			8043249100115011,
-			[
-				["images/sprite7-sheet0.png", 156, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],1]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		4659937325307405,
-		[]
-	]
-,	[
-		"t21",
+		"t11",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19503,7 +14980,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t22",
+		"t12",
 		cr.plugins_.Arr,
 		false,
 		[],
@@ -19519,7 +14996,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t23",
+		"t13",
 		cr.plugins_.Keyboard,
 		false,
 		[],
@@ -19536,7 +15013,7 @@ cr.getProjectModel = function() { return [
 		,[]
 	]
 ,	[
-		"t24",
+		"t14",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19565,7 +15042,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t25",
+		"t15",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19594,7 +15071,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t26",
+		"t16",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19623,143 +15100,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t27",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
-			6005656540649894,
-			[
-				["images/restart-sheet0.png", 156, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],1]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		6995347649345021,
-		[]
-	]
-,	[
-		"t28",
-		cr.plugins_.Audio,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		2246363533106673,
-		[]
-		,[0,1,1,600,600,10000,1,5000,1]
-	]
-,	[
-		"t29",
-		cr.plugins_.UserMedia,
-		false,
-		[],
-		0,
-		0,
-		null,
-		null,
-		[
-		],
-		false,
-		false,
-		1433901887236765,
-		[]
-	]
-,	[
-		"t30",
-		cr.plugins_.TiledBg,
-		false,
-		[],
-		0,
-		0,
-		["images/tiledbackground.png", 447, 0],
-		null,
-		[
-		],
-		false,
-		false,
-		4641020066075344,
-		[]
-	]
-,	[
-		"t31",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
-			6610909768116951,
-			[
-				["images/sprite8-sheet0.png", 480, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],0]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		4340958359998328,
-		[]
-	]
-,	[
-		"t32",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
-			7383755063092604,
-			[
-				["images/sprite9-sheet0.png", 673714, 0, 0, 814, 982, 1, 0.5, 0.5,[],[],1]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		7419319137165849,
-		[]
-	]
-,	[
-		"t33",
+		"t17",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19788,7 +15129,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t34",
+		"t18",
 		cr.plugins_.Sprite,
 		false,
 		[],
@@ -19817,39 +15158,7 @@ cr.getProjectModel = function() { return [
 		[]
 	]
 ,	[
-		"t35",
-		cr.plugins_.c2canvas,
-		false,
-		[],
-		0,
-		0,
-		["images/canvas.png", 169, 3],
-		null,
-		[
-		],
-		false,
-		false,
-		6157753153488881,
-		[]
-	]
-,	[
-		"t36",
-		cr.plugins_.c2canvas,
-		false,
-		[],
-		0,
-		0,
-		["images/canvas2.png", 169, 3],
-		null,
-		[
-		],
-		false,
-		false,
-		2470021850293532,
-		[]
-	]
-,	[
-		"t37",
+		"t19",
 		cr.plugins_.c2canvas,
 		false,
 		[],
@@ -19862,35 +15171,6 @@ cr.getProjectModel = function() { return [
 		false,
 		false,
 		7740115581153225,
-		[]
-	]
-,	[
-		"t38",
-		cr.plugins_.Sprite,
-		false,
-		[],
-		0,
-		0,
-		null,
-		[
-			[
-			"Default",
-			5,
-			false,
-			1,
-			0,
-			false,
-			4593973672331465,
-			[
-				["images/sprite10-sheet0.png", 156, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],1]
-			]
-			]
-		],
-		[
-		],
-		false,
-		false,
-		4418843232810713,
 		[]
 	]
 	],
@@ -19922,7 +15202,7 @@ cr.getProjectModel = function() { return [
 			[
 			[
 				[1000, 328, 0, 2, 2, 0, 0, 1, 0.5, 0.5, 0, 0, []],
-				34,
+				18,
 				893,
 				[
 				],
@@ -19937,7 +15217,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[164, 315, 0, 490, 272, 0, 0, 1, 0, 0, 0, 0, []],
-				37,
+				19,
 				8,
 				[
 				],
@@ -19969,7 +15249,7 @@ cr.getProjectModel = function() { return [
 			[
 			[
 				[393.042, 843, 0, 528.501, 134, 0, 0, 1, 0.50119, 0.5, 0, 0, []],
-				1,
+				0,
 				1,
 				[
 				],
@@ -19984,7 +15264,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[392, 887, 0, 65, 66.3614, 0, 0, 1, 0.516129, 1, 0, 0, []],
-				4,
+				2,
 				4,
 				[
 				],
@@ -20007,7 +15287,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[66, 853, 0, 124.5, 105.5, 0, 0, 1, 0.5, 0.5, 0, 0, []],
-				10,
+				4,
 				9,
 				[
 				],
@@ -20022,7 +15302,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[712, 858, 0, 88.5099, 128.335, 0, 0, 1, 0.5, 0.5, 0, 0, []],
-				11,
+				5,
 				10,
 				[
 				],
@@ -20037,7 +15317,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[657, 549, 0, 170, 170, 0, 0, 1, 0.5, 0.5, 0, 0, []],
-				19,
+				10,
 				16,
 				[
 				],
@@ -20052,7 +15332,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[109, 548, 0, 170, 170, 0, 0, 1, 0.5, 0.5, 0, 0, []],
-				18,
+				9,
 				15,
 				[
 				],
@@ -20103,7 +15383,7 @@ cr.getProjectModel = function() { return [
 			[
 			[
 				[399, 466, 0, 9.65597, 0.847169, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				11,
 				[
 				],
@@ -20118,7 +15398,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[391, 463, 0, 9.65597, 2.15627, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				14,
 				[
 				],
@@ -20133,7 +15413,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[384, 460, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				17,
 				[
 				],
@@ -20148,7 +15428,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[376, 457, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				18,
 				[
 				],
@@ -20163,7 +15443,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 522, 0, 8.78195, 2.8421, 0, 0.661712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				19,
 				[
 				],
@@ -20178,7 +15458,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[364, 446, 0, 8.28046, 3.01423, 0, 0.860645, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				20,
 				[
 				],
@@ -20193,7 +15473,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[359, 441, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				21,
 				[
 				],
@@ -20208,7 +15488,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[356, 435, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				22,
 				[
 				],
@@ -20223,7 +15503,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[353, 429, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				23,
 				[
 				],
@@ -20238,7 +15518,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[350, 423, 0, 7.64349, 3.26542, 0, 1.22301, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				24,
 				[
 				],
@@ -20253,7 +15533,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[347, 416, 0, 7.51748, 3.32015, 0, 1.35567, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				25,
 				[
 				],
@@ -20268,7 +15548,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[345, 409, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				26,
 				[
 				],
@@ -20283,7 +15563,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[347, 401, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				27,
 				[
 				],
@@ -20298,7 +15578,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[347, 395, 0, 7.90903, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				28,
 				[
 				],
@@ -20313,7 +15593,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[349, 387, 0, 7.17068, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				29,
 				[
 				],
@@ -20328,7 +15608,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[351, 381, 0, 7.47768, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				30,
 				[
 				],
@@ -20343,7 +15623,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[354, 375, 0, 7.17058, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				31,
 				[
 				],
@@ -20358,7 +15638,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[357, 370, 0, 6.8453, 3.05109, 0, 2.2363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				32,
 				[
 				],
@@ -20373,7 +15653,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[360, 365, 0, 6.6124, 3.15856, 0, 2.09506, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				33,
 				[
 				],
@@ -20388,7 +15668,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[364, 360, 0, 7.08798, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				34,
 				[
 				],
@@ -20403,7 +15683,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[369, 356, 0, 9.31068, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				35,
 				[
 				],
@@ -20418,7 +15698,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[408, 490, 0, 8.28326, 1.72008, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				36,
 				[
 				],
@@ -20433,7 +15713,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[401, 489, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				37,
 				[
 				],
@@ -20448,7 +15728,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[393, 487, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				38,
 				[
 				],
@@ -20463,7 +15743,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[386, 486, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				39,
 				[
 				],
@@ -20478,7 +15758,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[379, 483, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				40,
 				[
 				],
@@ -20493,7 +15773,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[374, 480, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				41,
 				[
 				],
@@ -20508,7 +15788,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[370, 477, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				42,
 				[
 				],
@@ -20523,7 +15803,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[364, 474, 0, 7.67361, 2.72175, 0, 0.519495, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				43,
 				[
 				],
@@ -20538,7 +15818,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[359, 470, 0, 7.65591, 2.72804, 0, 0.52725, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				44,
 				[
 				],
@@ -20553,7 +15833,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[353, 466, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				45,
 				[
 				],
@@ -20568,7 +15848,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[349, 463, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				46,
 				[
 				],
@@ -20583,7 +15863,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[345, 459, 0, 7.0093, 2.97971, 0, 0.819873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				47,
 				[
 				],
@@ -20598,7 +15878,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[341, 455, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				48,
 				[
 				],
@@ -20613,7 +15893,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[336, 450, 0, 7.97055, 2.95633, 0, 0.792677, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				49,
 				[
 				],
@@ -20628,7 +15908,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[332, 445, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				50,
 				[
 				],
@@ -20643,7 +15923,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[329, 440, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				51,
 				[
 				],
@@ -20658,7 +15938,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[326, 434, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				52,
 				[
 				],
@@ -20673,7 +15953,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[324, 429, 0, 6.37771, 5.08087, 0, 1.24218, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				53,
 				[
 				],
@@ -20688,7 +15968,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[323, 424, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				54,
 				[
 				],
@@ -20703,7 +15983,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[322, 418, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				55,
 				[
 				],
@@ -20718,7 +15998,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[322, 413, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				56,
 				[
 				],
@@ -20733,7 +16013,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[322, 407, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				57,
 				[
 				],
@@ -20748,7 +16028,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[323, 401, 0, 7.05185, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				58,
 				[
 				],
@@ -20763,7 +16043,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[326, 395, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				59,
 				[
 				],
@@ -20778,7 +16058,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[328, 390, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				60,
 				[
 				],
@@ -20793,7 +16073,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[331, 385, 0, 6.44894, 5.46372, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				61,
 				[
 				],
@@ -20808,7 +16088,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[333, 380, 0, 6.70411, 5.25576, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				62,
 				[
 				],
@@ -20823,7 +16103,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[336, 376, 0, 6.70411, 4.47031, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				63,
 				[
 				],
@@ -20838,7 +16118,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[340, 372, 0, 6.96748, 4.30133, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				64,
 				[
 				],
@@ -20853,7 +16133,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[344, 367, 0, 6.96748, 3.8348, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				65,
 				[
 				],
@@ -20868,7 +16148,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[348, 362, 0, 6.96748, 3.05601, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				66,
 				[
 				],
@@ -20883,7 +16163,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[352, 358, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				67,
 				[
 				],
@@ -20898,7 +16178,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[357, 354, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				68,
 				[
 				],
@@ -20913,7 +16193,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[361, 351, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				69,
 				[
 				],
@@ -20928,7 +16208,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[364, 349, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				70,
 				[
 				],
@@ -20943,7 +16223,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[341, 479, 0, 7.81826, 0.962684, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				71,
 				[
 				],
@@ -20958,7 +16238,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[334, 476, 0, 7.81826, 1.61341, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				72,
 				[
 				],
@@ -20973,7 +16253,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[329, 472, 0, 7.81826, 2.07631, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				73,
 				[
 				],
@@ -20988,7 +16268,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[322, 469, 0, 7.68974, 2.11101, 0, 0.51241, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				74,
 				[
 				],
@@ -21003,7 +16283,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[316, 465, 0, 7.61691, 2.13119, 0, 0.544291, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				75,
 				[
 				],
@@ -21018,7 +16298,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[311, 462, 0, 7.40506, 2.19217, 0, 0.636796, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				76,
 				[
 				],
@@ -21033,7 +16313,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[305, 457, 0, 7.17154, 2.26355, 0, 0.742017, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				77,
 				[
 				],
@@ -21048,7 +16328,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[301, 453, 0, 6.93029, 2.34234, 0, 0.859987, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				78,
 				[
 				],
@@ -21063,7 +16343,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[298, 448, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				79,
 				[
 				],
@@ -21078,7 +16358,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[295, 443, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				80,
 				[
 				],
@@ -21093,7 +16373,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[292, 438, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				81,
 				[
 				],
@@ -21108,7 +16388,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[290, 433, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				82,
 				[
 				],
@@ -21123,7 +16403,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[288, 427, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				83,
 				[
 				],
@@ -21138,7 +16418,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[287, 422, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				84,
 				[
 				],
@@ -21153,7 +16433,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[286, 419, 0, 6.27176, 2.58829, 0, 1.38924, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				85,
 				[
 				],
@@ -21168,7 +16448,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[285, 414, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				86,
 				[
 				],
@@ -21183,7 +16463,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[286, 410, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				87,
 				[
 				],
@@ -21198,7 +16478,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[286, 405, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				88,
 				[
 				],
@@ -21213,7 +16493,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[287, 399, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				89,
 				[
 				],
@@ -21228,7 +16508,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[289, 394, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				90,
 				[
 				],
@@ -21243,7 +16523,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[291, 389, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				91,
 				[
 				],
@@ -21258,7 +16538,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[293, 384, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				92,
 				[
 				],
@@ -21273,7 +16553,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[296, 379, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				93,
 				[
 				],
@@ -21288,7 +16568,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[300, 375, 0, 7.11302, 2.28217, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				94,
 				[
 				],
@@ -21303,7 +16583,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[305, 370, 0, 7.37963, 2.19972, 0, 2.49359, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				95,
 				[
 				],
@@ -21318,7 +16598,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[310, 367, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				96,
 				[
 				],
@@ -21333,7 +16613,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[314, 363, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				97,
 				[
 				],
@@ -21348,7 +16628,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[319, 359, 0, 7.30156, 2.72427, 0, 2.45887, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				98,
 				[
 				],
@@ -21363,7 +16643,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[324, 355, 0, 7.37702, 2.6964, 0, 2.49244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				99,
 				[
 				],
@@ -21378,7 +16658,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[329, 350, 0, 7.52488, 2.64342, 0, 2.5572, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				100,
 				[
 				],
@@ -21393,7 +16673,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[336, 347, 0, 7.72126, 1.76688, 0, 2.64308, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				101,
 				[
 				],
@@ -21408,7 +16688,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[342, 344, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				102,
 				[
 				],
@@ -21423,7 +16703,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[348, 342, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				103,
 				[
 				],
@@ -21438,7 +16718,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[354, 340, 0, 8.15913, 1.67206, 0, 2.85678, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				104,
 				[
 				],
@@ -21453,7 +16733,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[284, 463, 0, 7.61801, 1.79083, 0, 0.54381, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				105,
 				[
 				],
@@ -21468,7 +16748,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[278, 459, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				106,
 				[
 				],
@@ -21483,7 +16763,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[273, 455, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				107,
 				[
 				],
@@ -21498,7 +16778,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[267, 451, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				108,
 				[
 				],
@@ -21513,7 +16793,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[262, 446, 0, 7.18999, 1.89744, 0, 0.733464, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				109,
 				[
 				],
@@ -21528,7 +16808,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[258, 442, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				110,
 				[
 				],
@@ -21543,7 +16823,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[254, 437, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				111,
 				[
 				],
@@ -21558,7 +16838,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[251, 432, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				112,
 				[
 				],
@@ -21573,7 +16853,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[249, 427, 0, 6.40946, 2.12851, 0, 1.20957, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				113,
 				[
 				],
@@ -21588,7 +16868,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[247, 422, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				114,
 				[
 				],
@@ -21603,7 +16883,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[246, 416, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				115,
 				[
 				],
@@ -21618,7 +16898,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[246, 411, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				116,
 				[
 				],
@@ -21633,7 +16913,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[246, 405, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				117,
 				[
 				],
@@ -21648,7 +16928,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[247, 400, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				118,
 				[
 				],
@@ -21663,7 +16943,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[248, 394, 0, 6.27812, 2.17304, 0, 1.76435, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				119,
 				[
 				],
@@ -21678,7 +16958,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[249, 389, 0, 6.44774, 2.11587, 0, 1.96783, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				120,
 				[
 				],
@@ -21693,7 +16973,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[252, 384, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				121,
 				[
 				],
@@ -21708,7 +16988,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[255, 379, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				122,
 				[
 				],
@@ -21723,7 +17003,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[259, 375, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				123,
 				[
 				],
@@ -21738,7 +17018,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[264, 370, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				124,
 				[
 				],
@@ -21753,7 +17033,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[269, 366, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				125,
 				[
 				],
@@ -21768,7 +17048,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[274, 362, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				126,
 				[
 				],
@@ -21783,7 +17063,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[278, 358, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				127,
 				[
 				],
@@ -21798,7 +17078,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[283, 354, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				128,
 				[
 				],
@@ -21813,7 +17093,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[430, 383, 0, 6.36212, 2.14434, 0, -1.88215, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				129,
 				[
 				],
@@ -21828,7 +17108,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[432, 387, 0, 4.56505, 1.89307, 0, -2.41579, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				130,
 				[
 				],
@@ -21843,7 +17123,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[436, 389, 0, 6.26075, 1.68885, 0, -2.81186, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				131,
 				[
 				],
@@ -21858,7 +17138,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[441, 389, 0, 5.75305, 1.63049, 0, 3.01498, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				132,
 				[
 				],
@@ -21873,7 +17153,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[446, 388, 0, 5.71126, 1.64242, 0, 2.95652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				133,
 				[
 				],
@@ -21888,7 +17168,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[451, 387, 0, 5.55078, 1.68991, 0, 2.80919, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				134,
 				[
 				],
@@ -21903,7 +17183,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[456, 385, 0, 5.25527, 1.78493, 0, 2.60878, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				135,
 				[
 				],
@@ -21918,7 +17198,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[459, 382, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				136,
 				[
 				],
@@ -21933,7 +17213,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[462, 379, 0, 4.87083, 1.92582, 0, 2.35825, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				137,
 				[
 				],
@@ -21948,7 +17228,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[465, 375, 0, 4.67862, 2.00493, 0, 2.2136, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				138,
 				[
 				],
@@ -21963,7 +17243,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[467, 372, 0, 4.51976, 2.0754, 0, 2.06784, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				139,
 				[
 				],
@@ -21978,7 +17258,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[470, 368, 0, 4.40891, 2.12758, 0, 1.93476, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				140,
 				[
 				],
@@ -21993,7 +17273,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[471, 364, 0, 4.29666, 2.18316, 0, 1.7006, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				141,
 				[
 				],
@@ -22008,7 +17288,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[471, 360, 0, 4.30629, 2.17828, 0, 1.40721, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				142,
 				[
 				],
@@ -22023,7 +17303,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[470, 356, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				143,
 				[
 				],
@@ -22038,7 +17318,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[468, 353, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				144,
 				[
 				],
@@ -22053,7 +17333,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[467, 350, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				145,
 				[
 				],
@@ -22068,7 +17348,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[465, 346, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				146,
 				[
 				],
@@ -22083,7 +17363,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[463, 343, 0, 4.64685, 2.01864, 0, 0.954589, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				147,
 				[
 				],
@@ -22098,7 +17378,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[460, 340, 0, 4.93025, 1.9026, 0, 0.742507, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				148,
 				[
 				],
@@ -22113,7 +17393,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[457, 337, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				149,
 				[
 				],
@@ -22128,7 +17408,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[453, 335, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				150,
 				[
 				],
@@ -22143,7 +17423,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[448, 334, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				151,
 				[
 				],
@@ -22158,7 +17438,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[445, 332, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				152,
 				[
 				],
@@ -22173,7 +17453,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[432, 382, 0, 5.34384, 1.75535, 0, -2.66561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				153,
 				[
 				],
@@ -22188,7 +17468,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[436, 383, 0, 5.79073, 1.61988, 0, -3.13077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				154,
 				[
 				],
@@ -22203,7 +17483,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[441, 382, 0, 5.31088, 1.76624, 0, 2.64431, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				155,
 				[
 				],
@@ -22218,7 +17498,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[445, 380, 0, 5.14648, 1.82266, 0, 2.5398, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				156,
 				[
 				],
@@ -22233,7 +17513,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[449, 377, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				157,
 				[
 				],
@@ -22248,7 +17528,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[452, 373, 0, 4.71808, 1.98816, 0, 2.24535, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				158,
 				[
 				],
@@ -22263,7 +17543,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[454, 370, 0, 4.33129, 2.16571, 0, 1.79994, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				159,
 				[
 				],
@@ -22278,7 +17558,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[454, 366, 0, 4.28957, 2.18677, 0, 1.4731, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				160,
 				[
 				],
@@ -22293,7 +17573,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[454, 362, 0, 4.35954, 2.15167, 0, 1.28515, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				161,
 				[
 				],
@@ -22308,7 +17588,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[452, 358, 0, 4.47411, 2.09658, 0, 1.12383, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				162,
 				[
 				],
@@ -22323,7 +17603,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[450, 355, 0, 4.64426, 2.01976, 0, 0.956803, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				163,
 				[
 				],
@@ -22338,7 +17618,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[447, 352, 0, 4.94461, 2.57351, 0, 0.732829, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				164,
 				[
 				],
@@ -22353,7 +17633,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[444, 350, 0, 5.20158, 3.43797, 0, 0.566873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				165,
 				[
 				],
@@ -22368,7 +17648,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[441, 348, 0, 5.41168, 4.00614, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				166,
 				[
 				],
@@ -22383,7 +17663,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[436, 346, 0, 5.41168, 4.7975, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				167,
 				[
 				],
@@ -22398,7 +17678,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[432, 344, 0, 5.63791, 5.17872, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				168,
 				[
 				],
@@ -22413,7 +17693,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[427, 343, 0, 5.63791, 5.93959, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				169,
 				[
 				],
@@ -22428,7 +17708,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[422, 341, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				170,
 				[
 				],
@@ -22443,7 +17723,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[418, 341, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				171,
 				[
 				],
@@ -22458,7 +17738,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[414, 340, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				172,
 				[
 				],
@@ -22473,7 +17753,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[412, 337, 0, 7.41995, 2.34078, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				173,
 				[
 				],
@@ -22488,7 +17768,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 340, 0, 5.78307, 3.00333, 0, 1.09341, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				174,
 				[
 				],
@@ -22503,7 +17783,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[473, 416, 0, 7.3539, 1.75087, 0, 2.97231, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				175,
 				[
 				],
@@ -22518,7 +17798,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[480, 414, 0, 7.00147, 1.839, 0, 2.73612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				176,
 				[
 				],
@@ -22533,7 +17813,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[485, 411, 0, 6.73199, 1.91261, 0, 2.599, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				177,
 				[
 				],
@@ -22548,7 +17828,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[491, 407, 0, 6.58376, 1.95567, 0, 2.52583, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				178,
 				[
 				],
@@ -22563,7 +17843,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[494, 404, 0, 6.22652, 2.06788, 0, 2.34108, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				179,
 				[
 				],
@@ -22578,7 +17858,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[498, 399, 0, 5.89026, 2.18593, 0, 2.13171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				180,
 				[
 				],
@@ -22593,7 +17873,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[500, 394, 0, 5.60679, 2.29645, 0, 1.86449, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				181,
 				[
 				],
@@ -22608,7 +17888,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[501, 389, 0, 5.55667, 2.31716, 0, 1.78549, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				182,
 				[
 				],
@@ -22623,7 +17903,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[502, 385, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				183,
 				[
 				],
@@ -22638,7 +17918,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[502, 379, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				184,
 				[
 				],
@@ -22653,7 +17933,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[503, 374, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				185,
 				[
 				],
@@ -22668,7 +17948,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[503, 370, 0, 5.50403, 2.33932, 0, 1.50833, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				186,
 				[
 				],
@@ -22683,7 +17963,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[502, 365, 0, 5.56518, 2.31362, 0, 1.34077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				187,
 				[
 				],
@@ -22698,7 +17978,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[501, 360, 0, 5.64436, 2.28116, 0, 1.22964, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				188,
 				[
 				],
@@ -22713,7 +17993,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[500, 356, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				189,
 				[
 				],
@@ -22728,7 +18008,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[497, 352, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				190,
 				[
 				],
@@ -22743,7 +18023,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[494, 347, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				191,
 				[
 				],
@@ -22758,7 +18038,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[491, 344, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				192,
 				[
 				],
@@ -22773,7 +18053,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[488, 340, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				193,
 				[
 				],
@@ -22788,7 +18068,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[484, 336, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				194,
 				[
 				],
@@ -22803,7 +18083,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[479, 332, 0, 6.70569, 1.92011, 0, 0.555578, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				195,
 				[
 				],
@@ -22818,7 +18098,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[474, 330, 0, 7.00063, 1.83922, 0, 0.405918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				196,
 				[
 				],
@@ -22833,7 +18113,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[468, 327, 0, 7.11273, 1.81023, 0, 0.343436, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				197,
 				[
 				],
@@ -22848,7 +18128,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[462, 325, 0, 7.34314, 1.75343, 0, 0.179855, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				198,
 				[
 				],
@@ -22863,7 +18143,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[457, 325, 0, 7.43951, 1.73072, 0, -0.0135056, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				199,
 				[
 				],
@@ -22878,7 +18158,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[452, 325, 0, 7.28115, 1.76836, 0, -0.23261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				200,
 				[
 				],
@@ -22893,7 +18173,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[447, 327, 0, 6.5014, 1.98045, 0, -0.656794, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				201,
 				[
 				],
@@ -22908,7 +18188,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[445, 329, 0, 5.87407, 2.19195, 0, -1.02172, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				202,
 				[
 				],
@@ -22923,7 +18203,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[448, 326, 0, 4.80617, 1.86229, 0, -0.451343, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				203,
 				[
 				],
@@ -22938,7 +18218,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[473, 418, 0, 4.82228, 1.85607, 0, -2.70221, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				204,
 				[
 				],
@@ -22953,7 +18233,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[477, 419, 0, 5.14672, 1.73906, 0, -3.03265, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				205,
 				[
 				],
@@ -22968,7 +18248,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[482, 419, 0, 5.12021, 1.74807, 0, 2.98459, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				206,
 				[
 				],
@@ -22983,7 +18263,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[487, 418, 0, 4.99675, 1.79126, 0, 2.84412, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				207,
 				[
 				],
@@ -22998,7 +18278,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[491, 416, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				208,
 				[
 				],
@@ -23013,7 +18293,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[494, 415, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				209,
 				[
 				],
@@ -23028,7 +18308,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[498, 413, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				210,
 				[
 				],
@@ -23043,7 +18323,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[502, 411, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				211,
 				[
 				],
@@ -23058,7 +18338,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[506, 409, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				212,
 				[
 				],
@@ -23073,7 +18353,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[509, 407, 0, 4.66046, 1.92051, 0, 2.58533, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				213,
 				[
 				],
@@ -23088,7 +18368,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[513, 404, 0, 5.66247, 1.94285, 0, 2.54732, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				214,
 				[
 				],
@@ -23103,7 +18383,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[517, 401, 0, 5.38358, 2.0435, 0, 2.38139, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				215,
 				[
 				],
@@ -23118,7 +18398,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[520, 396, 0, 7.65072, 2.23615, 0, 2.02652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				216,
 				[
 				],
@@ -23133,7 +18413,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[522, 389, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				217,
 				[
 				],
@@ -23148,7 +18428,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[524, 383, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				218,
 				[
 				],
@@ -23163,7 +18443,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[525, 377, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				219,
 				[
 				],
@@ -23178,7 +18458,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[526, 373, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				220,
 				[
 				],
@@ -23193,7 +18473,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[527, 369, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				221,
 				[
 				],
@@ -23208,7 +18488,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[527, 364, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				222,
 				[
 				],
@@ -23223,7 +18503,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 359, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				223,
 				[
 				],
@@ -23238,7 +18518,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 353, 0, 5.44802, 2.33867, 0, 1.64244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				224,
 				[
 				],
@@ -23253,7 +18533,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 348, 0, 5.44174, 2.34137, 0, 1.5643, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				225,
 				[
 				],
@@ -23268,7 +18548,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 344, 0, 5.50299, 2.31531, 0, 1.34798, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				226,
 				[
 				],
@@ -23283,7 +18563,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[526, 340, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				227,
 				[
 				],
@@ -23298,7 +18578,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[524, 335, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				228,
 				[
 				],
@@ -23313,7 +18593,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[521, 331, 0, 6.14082, 2.07483, 0, 0.812098, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				229,
 				[
 				],
@@ -23328,7 +18608,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[518, 328, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				230,
 				[
 				],
@@ -23343,7 +18623,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[516, 325, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				231,
 				[
 				],
@@ -23358,7 +18638,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[390, 842, 0, 128.615, 6.93707, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				24,
+				14,
 				236,
 				[
 				],
@@ -23373,7 +18653,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[298, 842, 0, 60.8501, 8.67134, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				25,
+				15,
 				237,
 				[
 				],
@@ -23388,7 +18668,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[484, 842, 0, 52.5523, 8.67134, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				25,
+				15,
 				238,
 				[
 				],
@@ -23403,7 +18683,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[204, 847, 0, 117.479, 17.3427, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				26,
+				16,
 				239,
 				[
 				],
@@ -23418,7 +18698,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[577, 847, 0, 117.551, 17.3427, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				26,
+				16,
 				240,
 				[
 				],
@@ -23433,7 +18713,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[356, 493, 0, 9.65597, 0.847169, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				241,
 				[
 				],
@@ -23448,7 +18728,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[348, 490, 0, 9.65597, 2.15627, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				242,
 				[
 				],
@@ -23463,7 +18743,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[341, 487, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				243,
 				[
 				],
@@ -23478,7 +18758,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[333, 484, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				244,
 				[
 				],
@@ -23493,7 +18773,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[326, 479, 0, 8.78195, 2.8421, 0, 0.661712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				245,
 				[
 				],
@@ -23508,7 +18788,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[321, 473, 0, 8.28046, 3.01423, 0, 0.860645, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				246,
 				[
 				],
@@ -23523,7 +18803,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[316, 468, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				247,
 				[
 				],
@@ -23538,7 +18818,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[313, 462, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				248,
 				[
 				],
@@ -23553,7 +18833,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[310, 456, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				249,
 				[
 				],
@@ -23568,7 +18848,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[307, 450, 0, 7.64349, 3.26542, 0, 1.22301, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				250,
 				[
 				],
@@ -23583,7 +18863,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[304, 443, 0, 7.51748, 3.32015, 0, 1.35567, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				251,
 				[
 				],
@@ -23598,7 +18878,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[302, 436, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				252,
 				[
 				],
@@ -23613,7 +18893,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[304, 428, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				253,
 				[
 				],
@@ -23628,7 +18908,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[304, 422, 0, 7.90903, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				254,
 				[
 				],
@@ -23643,7 +18923,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[306, 414, 0, 7.17068, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				255,
 				[
 				],
@@ -23658,7 +18938,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[308, 408, 0, 7.47768, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				256,
 				[
 				],
@@ -23673,7 +18953,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[311, 402, 0, 7.17058, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				257,
 				[
 				],
@@ -23688,7 +18968,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[314, 397, 0, 6.8453, 3.05109, 0, 2.2363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				258,
 				[
 				],
@@ -23703,7 +18983,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[317, 392, 0, 6.6124, 3.15856, 0, 2.09506, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				259,
 				[
 				],
@@ -23718,7 +18998,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[321, 387, 0, 7.08798, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				260,
 				[
 				],
@@ -23733,7 +19013,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[326, 383, 0, 9.31068, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				261,
 				[
 				],
@@ -23748,7 +19028,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[365, 517, 0, 8.28326, 1.72008, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				262,
 				[
 				],
@@ -23763,7 +19043,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[358, 516, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				263,
 				[
 				],
@@ -23778,7 +19058,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[350, 514, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				264,
 				[
 				],
@@ -23793,7 +19073,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[343, 513, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				265,
 				[
 				],
@@ -23808,7 +19088,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[336, 510, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				266,
 				[
 				],
@@ -23823,7 +19103,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[331, 507, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				267,
 				[
 				],
@@ -23838,7 +19118,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[327, 504, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				268,
 				[
 				],
@@ -23853,7 +19133,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[321, 501, 0, 7.67361, 2.72175, 0, 0.519495, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				269,
 				[
 				],
@@ -23868,7 +19148,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[316, 497, 0, 7.65591, 2.72804, 0, 0.52725, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				270,
 				[
 				],
@@ -23883,7 +19163,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[310, 493, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				271,
 				[
 				],
@@ -23898,7 +19178,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[306, 490, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				272,
 				[
 				],
@@ -23913,7 +19193,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[302, 486, 0, 7.0093, 2.97971, 0, 0.819873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				273,
 				[
 				],
@@ -23928,7 +19208,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[298, 482, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				274,
 				[
 				],
@@ -23943,7 +19223,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[293, 477, 0, 7.97055, 2.95633, 0, 0.792677, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				275,
 				[
 				],
@@ -23958,7 +19238,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[289, 472, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				276,
 				[
 				],
@@ -23973,7 +19253,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[286, 467, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				277,
 				[
 				],
@@ -23988,7 +19268,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[283, 461, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				278,
 				[
 				],
@@ -24003,7 +19283,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[281, 456, 0, 6.37771, 5.08087, 0, 1.24218, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				279,
 				[
 				],
@@ -24018,7 +19298,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[280, 451, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				280,
 				[
 				],
@@ -24033,7 +19313,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[279, 445, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				281,
 				[
 				],
@@ -24048,7 +19328,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[279, 440, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				282,
 				[
 				],
@@ -24063,7 +19343,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[279, 434, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				283,
 				[
 				],
@@ -24078,7 +19358,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[280, 428, 0, 7.05185, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				284,
 				[
 				],
@@ -24093,7 +19373,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[283, 422, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				285,
 				[
 				],
@@ -24108,7 +19388,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[285, 417, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				286,
 				[
 				],
@@ -24123,7 +19403,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[288, 412, 0, 6.44894, 5.46372, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				287,
 				[
 				],
@@ -24138,7 +19418,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[290, 407, 0, 6.70411, 5.25576, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				288,
 				[
 				],
@@ -24153,7 +19433,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[293, 403, 0, 6.70411, 4.47031, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				289,
 				[
 				],
@@ -24168,7 +19448,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[297, 399, 0, 6.96748, 4.30133, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				290,
 				[
 				],
@@ -24183,7 +19463,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[301, 394, 0, 6.96748, 3.8348, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				291,
 				[
 				],
@@ -24198,7 +19478,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[305, 389, 0, 6.96748, 3.05601, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				292,
 				[
 				],
@@ -24213,7 +19493,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[309, 385, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				293,
 				[
 				],
@@ -24228,7 +19508,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[314, 381, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				294,
 				[
 				],
@@ -24243,7 +19523,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[318, 378, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				295,
 				[
 				],
@@ -24258,7 +19538,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[321, 376, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				296,
 				[
 				],
@@ -24273,7 +19553,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[298, 506, 0, 7.81826, 0.962684, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				297,
 				[
 				],
@@ -24288,7 +19568,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[291, 503, 0, 7.81826, 1.61341, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				298,
 				[
 				],
@@ -24303,7 +19583,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[286, 499, 0, 7.81826, 2.07631, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				299,
 				[
 				],
@@ -24318,7 +19598,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[279, 496, 0, 7.68974, 2.11101, 0, 0.51241, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				300,
 				[
 				],
@@ -24333,7 +19613,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[273, 492, 0, 7.61691, 2.13119, 0, 0.544291, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				301,
 				[
 				],
@@ -24348,7 +19628,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[268, 489, 0, 7.40506, 2.19217, 0, 0.636796, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				302,
 				[
 				],
@@ -24363,7 +19643,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[262, 484, 0, 7.17154, 2.26355, 0, 0.742017, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				303,
 				[
 				],
@@ -24378,7 +19658,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[258, 480, 0, 6.93029, 2.34234, 0, 0.859987, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				304,
 				[
 				],
@@ -24393,7 +19673,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[255, 475, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				305,
 				[
 				],
@@ -24408,7 +19688,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[252, 470, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				306,
 				[
 				],
@@ -24423,7 +19703,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[249, 465, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				307,
 				[
 				],
@@ -24438,7 +19718,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[247, 460, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				308,
 				[
 				],
@@ -24453,7 +19733,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[245, 454, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				309,
 				[
 				],
@@ -24468,7 +19748,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[244, 449, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				310,
 				[
 				],
@@ -24483,7 +19763,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[243, 446, 0, 6.27176, 2.58829, 0, 1.38924, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				311,
 				[
 				],
@@ -24498,7 +19778,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[242, 441, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				312,
 				[
 				],
@@ -24513,7 +19793,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[243, 437, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				313,
 				[
 				],
@@ -24528,7 +19808,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[243, 432, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				314,
 				[
 				],
@@ -24543,7 +19823,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[244, 426, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				315,
 				[
 				],
@@ -24558,7 +19838,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[246, 421, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				316,
 				[
 				],
@@ -24573,7 +19853,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[248, 416, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				317,
 				[
 				],
@@ -24588,7 +19868,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[250, 411, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				318,
 				[
 				],
@@ -24603,7 +19883,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[253, 406, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				319,
 				[
 				],
@@ -24618,7 +19898,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[257, 402, 0, 7.11302, 2.28217, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				320,
 				[
 				],
@@ -24633,7 +19913,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[262, 397, 0, 7.37963, 2.19972, 0, 2.49359, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				321,
 				[
 				],
@@ -24648,7 +19928,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[267, 394, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				322,
 				[
 				],
@@ -24663,7 +19943,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[271, 390, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				323,
 				[
 				],
@@ -24678,7 +19958,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[276, 386, 0, 7.30156, 2.72427, 0, 2.45887, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				324,
 				[
 				],
@@ -24693,7 +19973,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[281, 382, 0, 7.37702, 2.6964, 0, 2.49244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				325,
 				[
 				],
@@ -24708,7 +19988,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[286, 377, 0, 7.52488, 2.64342, 0, 2.5572, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				326,
 				[
 				],
@@ -24723,7 +20003,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[293, 374, 0, 7.72126, 1.76688, 0, 2.64308, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				327,
 				[
 				],
@@ -24738,7 +20018,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[299, 371, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				328,
 				[
 				],
@@ -24753,7 +20033,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[305, 369, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				329,
 				[
 				],
@@ -24768,7 +20048,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[311, 367, 0, 8.15913, 1.67206, 0, 2.85678, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				330,
 				[
 				],
@@ -24783,7 +20063,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[241, 490, 0, 7.61801, 1.79083, 0, 0.54381, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				331,
 				[
 				],
@@ -24798,7 +20078,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[235, 486, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				332,
 				[
 				],
@@ -24813,7 +20093,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[230, 482, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				333,
 				[
 				],
@@ -24828,7 +20108,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[224, 478, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				334,
 				[
 				],
@@ -24843,7 +20123,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[219, 473, 0, 7.18999, 1.89744, 0, 0.733464, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				335,
 				[
 				],
@@ -24858,7 +20138,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[215, 469, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				336,
 				[
 				],
@@ -24873,7 +20153,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[211, 464, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				337,
 				[
 				],
@@ -24888,7 +20168,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[208, 459, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				338,
 				[
 				],
@@ -24903,7 +20183,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[206, 454, 0, 6.40946, 2.12851, 0, 1.20957, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				339,
 				[
 				],
@@ -24918,7 +20198,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[204, 449, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				340,
 				[
 				],
@@ -24933,7 +20213,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[203, 443, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				341,
 				[
 				],
@@ -24948,7 +20228,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[203, 438, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				342,
 				[
 				],
@@ -24963,7 +20243,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[203, 432, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				343,
 				[
 				],
@@ -24978,7 +20258,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[204, 427, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				344,
 				[
 				],
@@ -24993,7 +20273,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[205, 421, 0, 6.27812, 2.17304, 0, 1.76435, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				345,
 				[
 				],
@@ -25008,7 +20288,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[206, 416, 0, 6.44774, 2.11587, 0, 1.96783, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				346,
 				[
 				],
@@ -25023,7 +20303,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[209, 411, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				347,
 				[
 				],
@@ -25038,7 +20318,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[212, 406, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				348,
 				[
 				],
@@ -25053,7 +20333,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[216, 402, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				349,
 				[
 				],
@@ -25068,7 +20348,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[221, 397, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				350,
 				[
 				],
@@ -25083,7 +20363,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[226, 393, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				351,
 				[
 				],
@@ -25098,7 +20378,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[231, 389, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				352,
 				[
 				],
@@ -25113,7 +20393,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[235, 385, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				353,
 				[
 				],
@@ -25128,7 +20408,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[240, 381, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				354,
 				[
 				],
@@ -25143,7 +20423,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[387, 410, 0, 6.36212, 2.14434, 0, -1.88215, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				355,
 				[
 				],
@@ -25158,7 +20438,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[389, 414, 0, 4.56505, 1.89307, 0, -2.41579, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				356,
 				[
 				],
@@ -25173,7 +20453,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[393, 416, 0, 6.26075, 1.68885, 0, -2.81186, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				357,
 				[
 				],
@@ -25188,7 +20468,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[398, 416, 0, 5.75305, 1.63049, 0, 3.01498, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				358,
 				[
 				],
@@ -25203,7 +20483,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[403, 415, 0, 5.71126, 1.64242, 0, 2.95652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				359,
 				[
 				],
@@ -25218,7 +20498,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[408, 414, 0, 5.55078, 1.68991, 0, 2.80919, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				360,
 				[
 				],
@@ -25233,7 +20513,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[413, 412, 0, 5.25527, 1.78493, 0, 2.60878, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				361,
 				[
 				],
@@ -25248,7 +20528,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[416, 409, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				362,
 				[
 				],
@@ -25263,7 +20543,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[419, 406, 0, 4.87083, 1.92582, 0, 2.35825, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				363,
 				[
 				],
@@ -25278,7 +20558,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[422, 402, 0, 4.67862, 2.00493, 0, 2.2136, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				364,
 				[
 				],
@@ -25293,7 +20573,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[424, 399, 0, 4.51976, 2.0754, 0, 2.06784, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				365,
 				[
 				],
@@ -25308,7 +20588,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[427, 395, 0, 4.40891, 2.12758, 0, 1.93476, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				366,
 				[
 				],
@@ -25323,7 +20603,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[428, 391, 0, 4.29666, 2.18316, 0, 1.7006, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				367,
 				[
 				],
@@ -25338,7 +20618,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[428, 387, 0, 4.30629, 2.17828, 0, 1.40721, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				368,
 				[
 				],
@@ -25353,7 +20633,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[427, 383, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				369,
 				[
 				],
@@ -25368,7 +20648,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[425, 380, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				370,
 				[
 				],
@@ -25383,7 +20663,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[424, 377, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				371,
 				[
 				],
@@ -25398,7 +20678,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[422, 373, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				372,
 				[
 				],
@@ -25413,7 +20693,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[420, 370, 0, 4.64685, 2.01864, 0, 0.954589, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				373,
 				[
 				],
@@ -25428,7 +20708,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[417, 367, 0, 4.93025, 1.9026, 0, 0.742507, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				374,
 				[
 				],
@@ -25443,7 +20723,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[414, 364, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				375,
 				[
 				],
@@ -25458,7 +20738,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[410, 362, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				376,
 				[
 				],
@@ -25473,7 +20753,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[405, 361, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				377,
 				[
 				],
@@ -25488,7 +20768,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[402, 359, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				378,
 				[
 				],
@@ -25503,7 +20783,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[389, 409, 0, 5.34384, 1.75535, 0, -2.66561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				379,
 				[
 				],
@@ -25518,7 +20798,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[393, 410, 0, 5.79073, 1.61988, 0, -3.13077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				380,
 				[
 				],
@@ -25533,7 +20813,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[398, 409, 0, 5.31088, 1.76624, 0, 2.64431, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				381,
 				[
 				],
@@ -25548,7 +20828,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[402, 407, 0, 5.14648, 1.82266, 0, 2.5398, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				382,
 				[
 				],
@@ -25563,7 +20843,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[406, 404, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				383,
 				[
 				],
@@ -25578,7 +20858,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[409, 400, 0, 4.71808, 1.98816, 0, 2.24535, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				384,
 				[
 				],
@@ -25593,7 +20873,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 397, 0, 4.33129, 2.16571, 0, 1.79994, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				385,
 				[
 				],
@@ -25608,7 +20888,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 393, 0, 4.28957, 2.18677, 0, 1.4731, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				386,
 				[
 				],
@@ -25623,7 +20903,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 389, 0, 4.35954, 2.15167, 0, 1.28515, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				387,
 				[
 				],
@@ -25638,7 +20918,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[409, 385, 0, 4.47411, 2.09658, 0, 1.12383, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				388,
 				[
 				],
@@ -25653,7 +20933,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[407, 382, 0, 4.64426, 2.01976, 0, 0.956803, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				389,
 				[
 				],
@@ -25668,7 +20948,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[404, 379, 0, 4.94461, 2.57351, 0, 0.732829, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				390,
 				[
 				],
@@ -25683,7 +20963,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[401, 377, 0, 5.20158, 3.43797, 0, 0.566873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				391,
 				[
 				],
@@ -25698,7 +20978,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[398, 375, 0, 5.41168, 4.00614, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				392,
 				[
 				],
@@ -25713,7 +20993,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[393, 373, 0, 5.41168, 4.7975, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				393,
 				[
 				],
@@ -25728,7 +21008,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[389, 371, 0, 5.63791, 5.17872, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				394,
 				[
 				],
@@ -25743,7 +21023,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[384, 370, 0, 5.63791, 5.93959, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				395,
 				[
 				],
@@ -25758,7 +21038,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[379, 368, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				396,
 				[
 				],
@@ -25773,7 +21053,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[375, 368, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				397,
 				[
 				],
@@ -25788,7 +21068,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[371, 367, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				398,
 				[
 				],
@@ -25803,7 +21083,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[369, 364, 0, 7.41995, 2.34078, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				399,
 				[
 				],
@@ -25818,7 +21098,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[368, 367, 0, 5.78307, 3.00333, 0, 1.09341, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				400,
 				[
 				],
@@ -25833,7 +21113,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[430, 443, 0, 7.3539, 1.75087, 0, 2.97231, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				401,
 				[
 				],
@@ -25848,7 +21128,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[437, 441, 0, 7.00147, 1.839, 0, 2.73612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				402,
 				[
 				],
@@ -25863,7 +21143,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[442, 438, 0, 6.73199, 1.91261, 0, 2.599, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				403,
 				[
 				],
@@ -25878,7 +21158,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[448, 434, 0, 6.58376, 1.95567, 0, 2.52583, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				404,
 				[
 				],
@@ -25893,7 +21173,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[451, 431, 0, 6.22652, 2.06788, 0, 2.34108, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				405,
 				[
 				],
@@ -25908,7 +21188,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[455, 426, 0, 5.89026, 2.18593, 0, 2.13171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				406,
 				[
 				],
@@ -25923,7 +21203,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[457, 421, 0, 5.60679, 2.29645, 0, 1.86449, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				407,
 				[
 				],
@@ -25938,7 +21218,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[458, 416, 0, 5.55667, 2.31716, 0, 1.78549, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				408,
 				[
 				],
@@ -25953,7 +21233,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[459, 412, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				409,
 				[
 				],
@@ -25968,7 +21248,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[459, 406, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				410,
 				[
 				],
@@ -25983,7 +21263,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[460, 401, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				411,
 				[
 				],
@@ -25998,7 +21278,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[460, 397, 0, 5.50403, 2.33932, 0, 1.50833, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				412,
 				[
 				],
@@ -26013,7 +21293,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[459, 392, 0, 5.56518, 2.31362, 0, 1.34077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				413,
 				[
 				],
@@ -26028,7 +21308,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[458, 387, 0, 5.64436, 2.28116, 0, 1.22964, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				414,
 				[
 				],
@@ -26043,7 +21323,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[457, 383, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				415,
 				[
 				],
@@ -26058,7 +21338,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[454, 379, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				416,
 				[
 				],
@@ -26073,7 +21353,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[451, 374, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				417,
 				[
 				],
@@ -26088,7 +21368,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[448, 371, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				418,
 				[
 				],
@@ -26103,7 +21383,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[445, 367, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				419,
 				[
 				],
@@ -26118,7 +21398,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[441, 363, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				420,
 				[
 				],
@@ -26133,7 +21413,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[436, 359, 0, 6.70569, 1.92011, 0, 0.555578, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				421,
 				[
 				],
@@ -26148,7 +21428,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[431, 357, 0, 7.00063, 1.83922, 0, 0.405918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				422,
 				[
 				],
@@ -26163,7 +21443,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[425, 354, 0, 7.11273, 1.81023, 0, 0.343436, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				423,
 				[
 				],
@@ -26178,7 +21458,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[419, 352, 0, 7.34314, 1.75343, 0, 0.179855, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				424,
 				[
 				],
@@ -26193,7 +21473,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[414, 352, 0, 7.43951, 1.73072, 0, -0.0135056, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				425,
 				[
 				],
@@ -26208,7 +21488,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[409, 352, 0, 7.28115, 1.76836, 0, -0.23261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				426,
 				[
 				],
@@ -26223,7 +21503,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[404, 354, 0, 6.5014, 1.98045, 0, -0.656794, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				427,
 				[
 				],
@@ -26238,7 +21518,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[402, 356, 0, 5.87407, 2.19195, 0, -1.02172, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				428,
 				[
 				],
@@ -26253,7 +21533,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[405, 353, 0, 4.80617, 1.86229, 0, -0.451343, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				429,
 				[
 				],
@@ -26268,7 +21548,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[430, 445, 0, 4.82228, 1.85607, 0, -2.70221, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				430,
 				[
 				],
@@ -26283,7 +21563,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[434, 446, 0, 5.14672, 1.73906, 0, -3.03265, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				431,
 				[
 				],
@@ -26298,7 +21578,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[439, 446, 0, 5.12021, 1.74807, 0, 2.98459, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				432,
 				[
 				],
@@ -26313,7 +21593,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[444, 445, 0, 4.99675, 1.79126, 0, 2.84412, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				433,
 				[
 				],
@@ -26328,7 +21608,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[448, 443, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				434,
 				[
 				],
@@ -26343,7 +21623,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[451, 442, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				435,
 				[
 				],
@@ -26358,7 +21638,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[455, 440, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				436,
 				[
 				],
@@ -26373,7 +21653,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[459, 438, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				437,
 				[
 				],
@@ -26388,7 +21668,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[463, 436, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				438,
 				[
 				],
@@ -26403,7 +21683,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[466, 434, 0, 4.66046, 1.92051, 0, 2.58533, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				439,
 				[
 				],
@@ -26418,7 +21698,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[470, 431, 0, 5.66247, 1.94285, 0, 2.54732, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				440,
 				[
 				],
@@ -26433,7 +21713,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[474, 428, 0, 5.38358, 2.0435, 0, 2.38139, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				441,
 				[
 				],
@@ -26448,7 +21728,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[477, 423, 0, 7.65072, 2.23615, 0, 2.02652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				442,
 				[
 				],
@@ -26463,7 +21743,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[479, 416, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				443,
 				[
 				],
@@ -26478,7 +21758,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[481, 410, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				444,
 				[
 				],
@@ -26493,7 +21773,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[482, 404, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				445,
 				[
 				],
@@ -26508,7 +21788,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[483, 400, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				446,
 				[
 				],
@@ -26523,7 +21803,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[484, 396, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				447,
 				[
 				],
@@ -26538,7 +21818,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[484, 391, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				448,
 				[
 				],
@@ -26553,7 +21833,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[485, 386, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				449,
 				[
 				],
@@ -26568,7 +21848,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[485, 380, 0, 5.44802, 2.33867, 0, 1.64244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				450,
 				[
 				],
@@ -26583,7 +21863,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[485, 375, 0, 5.44174, 2.34137, 0, 1.5643, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				451,
 				[
 				],
@@ -26598,7 +21878,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[485, 371, 0, 5.50299, 2.31531, 0, 1.34798, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				452,
 				[
 				],
@@ -26613,7 +21893,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[483, 367, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				453,
 				[
 				],
@@ -26628,7 +21908,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[481, 362, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				454,
 				[
 				],
@@ -26643,7 +21923,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[478, 358, 0, 6.14082, 2.07483, 0, 0.812098, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				455,
 				[
 				],
@@ -26658,7 +21938,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[475, 355, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				456,
 				[
 				],
@@ -26673,7 +21953,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[473, 352, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				457,
 				[
 				],
@@ -26688,7 +21968,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[459, 487, 0, 9.65597, 0.847169, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				458,
 				[
 				],
@@ -26703,7 +21983,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[451, 484, 0, 9.65597, 2.15627, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				459,
 				[
 				],
@@ -26718,7 +21998,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[444, 481, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				460,
 				[
 				],
@@ -26733,7 +22013,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[436, 478, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				461,
 				[
 				],
@@ -26748,7 +22028,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[429, 473, 0, 8.78195, 2.8421, 0, 0.661712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				462,
 				[
 				],
@@ -26763,7 +22043,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[424, 467, 0, 8.28046, 3.01423, 0, 0.860645, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				463,
 				[
 				],
@@ -26778,7 +22058,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[419, 462, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				464,
 				[
 				],
@@ -26793,7 +22073,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[416, 456, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				465,
 				[
 				],
@@ -26808,7 +22088,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[413, 450, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				466,
 				[
 				],
@@ -26823,7 +22103,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[410, 444, 0, 7.64349, 3.26542, 0, 1.22301, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				467,
 				[
 				],
@@ -26838,7 +22118,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[407, 437, 0, 7.51748, 3.32015, 0, 1.35567, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				468,
 				[
 				],
@@ -26853,7 +22133,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[405, 430, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				469,
 				[
 				],
@@ -26868,7 +22148,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[407, 422, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				470,
 				[
 				],
@@ -26883,7 +22163,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[407, 416, 0, 7.90903, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				471,
 				[
 				],
@@ -26898,7 +22178,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[409, 408, 0, 7.17068, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				472,
 				[
 				],
@@ -26913,7 +22193,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 402, 0, 7.47768, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				473,
 				[
 				],
@@ -26928,7 +22208,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[414, 396, 0, 7.17058, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				474,
 				[
 				],
@@ -26943,7 +22223,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[417, 391, 0, 6.8453, 3.05109, 0, 2.2363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				475,
 				[
 				],
@@ -26958,7 +22238,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[420, 386, 0, 6.6124, 3.15856, 0, 2.09506, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				476,
 				[
 				],
@@ -26973,7 +22253,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[424, 381, 0, 7.08798, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				477,
 				[
 				],
@@ -26988,7 +22268,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[429, 377, 0, 9.31068, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				478,
 				[
 				],
@@ -27003,7 +22283,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[468, 511, 0, 8.28326, 1.72008, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				479,
 				[
 				],
@@ -27018,7 +22298,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[461, 510, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				480,
 				[
 				],
@@ -27033,7 +22313,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[453, 508, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				481,
 				[
 				],
@@ -27048,7 +22328,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[446, 507, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				482,
 				[
 				],
@@ -27063,7 +22343,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[439, 504, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				483,
 				[
 				],
@@ -27078,7 +22358,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[434, 501, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				484,
 				[
 				],
@@ -27093,7 +22373,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[430, 498, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				485,
 				[
 				],
@@ -27108,7 +22388,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[424, 495, 0, 7.67361, 2.72175, 0, 0.519495, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				486,
 				[
 				],
@@ -27123,7 +22403,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[419, 491, 0, 7.65591, 2.72804, 0, 0.52725, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				487,
 				[
 				],
@@ -27138,7 +22418,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[413, 487, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				488,
 				[
 				],
@@ -27153,7 +22433,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[409, 484, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				489,
 				[
 				],
@@ -27168,7 +22448,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[405, 480, 0, 7.0093, 2.97971, 0, 0.819873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				490,
 				[
 				],
@@ -27183,7 +22463,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[401, 476, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				491,
 				[
 				],
@@ -27198,7 +22478,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[396, 471, 0, 7.97055, 2.95633, 0, 0.792677, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				492,
 				[
 				],
@@ -27213,7 +22493,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[392, 466, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				493,
 				[
 				],
@@ -27228,7 +22508,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[389, 461, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				494,
 				[
 				],
@@ -27243,7 +22523,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[386, 455, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				495,
 				[
 				],
@@ -27258,7 +22538,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[384, 450, 0, 6.37771, 5.08087, 0, 1.24218, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				496,
 				[
 				],
@@ -27273,7 +22553,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[383, 445, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				497,
 				[
 				],
@@ -27288,7 +22568,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[382, 439, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				498,
 				[
 				],
@@ -27303,7 +22583,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[382, 434, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				499,
 				[
 				],
@@ -27318,7 +22598,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[382, 428, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				500,
 				[
 				],
@@ -27333,7 +22613,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[383, 422, 0, 7.05185, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				501,
 				[
 				],
@@ -27348,7 +22628,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[386, 416, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				502,
 				[
 				],
@@ -27363,7 +22643,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[388, 411, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				503,
 				[
 				],
@@ -27378,7 +22658,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[391, 406, 0, 6.44894, 5.46372, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				504,
 				[
 				],
@@ -27393,7 +22673,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[393, 401, 0, 6.70411, 5.25576, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				505,
 				[
 				],
@@ -27408,7 +22688,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[396, 397, 0, 6.70411, 4.47031, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				506,
 				[
 				],
@@ -27423,7 +22703,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[400, 393, 0, 6.96748, 4.30133, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				507,
 				[
 				],
@@ -27438,7 +22718,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[404, 388, 0, 6.96748, 3.8348, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				508,
 				[
 				],
@@ -27453,7 +22733,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[408, 383, 0, 6.96748, 3.05601, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				509,
 				[
 				],
@@ -27468,7 +22748,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[412, 379, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				510,
 				[
 				],
@@ -27483,7 +22763,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[417, 375, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				511,
 				[
 				],
@@ -27498,7 +22778,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[421, 372, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				512,
 				[
 				],
@@ -27513,7 +22793,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[424, 370, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				513,
 				[
 				],
@@ -27528,7 +22808,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[401, 500, 0, 7.81826, 0.962684, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				514,
 				[
 				],
@@ -27543,7 +22823,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[394, 497, 0, 7.81826, 1.61341, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				515,
 				[
 				],
@@ -27558,7 +22838,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[389, 493, 0, 7.81826, 2.07631, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				516,
 				[
 				],
@@ -27573,7 +22853,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[382, 490, 0, 7.68974, 2.11101, 0, 0.51241, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				517,
 				[
 				],
@@ -27588,7 +22868,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[376, 486, 0, 7.61691, 2.13119, 0, 0.544291, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				518,
 				[
 				],
@@ -27603,7 +22883,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[371, 483, 0, 7.40506, 2.19217, 0, 0.636796, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				519,
 				[
 				],
@@ -27618,7 +22898,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[365, 478, 0, 7.17154, 2.26355, 0, 0.742017, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				520,
 				[
 				],
@@ -27633,7 +22913,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[361, 474, 0, 6.93029, 2.34234, 0, 0.859987, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				521,
 				[
 				],
@@ -27648,7 +22928,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[358, 469, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				522,
 				[
 				],
@@ -27663,7 +22943,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[355, 464, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				523,
 				[
 				],
@@ -27678,7 +22958,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[352, 459, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				524,
 				[
 				],
@@ -27693,7 +22973,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[350, 454, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				525,
 				[
 				],
@@ -27708,7 +22988,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[348, 448, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				526,
 				[
 				],
@@ -27723,7 +23003,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[347, 443, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				527,
 				[
 				],
@@ -27738,7 +23018,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[346, 440, 0, 6.27176, 2.58829, 0, 1.38924, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				528,
 				[
 				],
@@ -27753,7 +23033,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[345, 435, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				529,
 				[
 				],
@@ -27768,7 +23048,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[346, 431, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				530,
 				[
 				],
@@ -27783,7 +23063,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[346, 426, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				531,
 				[
 				],
@@ -27798,7 +23078,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[347, 420, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				532,
 				[
 				],
@@ -27813,7 +23093,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[349, 415, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				533,
 				[
 				],
@@ -27828,7 +23108,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[351, 410, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				534,
 				[
 				],
@@ -27843,7 +23123,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[353, 405, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				535,
 				[
 				],
@@ -27858,7 +23138,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[356, 400, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				536,
 				[
 				],
@@ -27873,7 +23153,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[360, 396, 0, 7.11302, 2.28217, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				537,
 				[
 				],
@@ -27888,7 +23168,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[365, 391, 0, 7.37963, 2.19972, 0, 2.49359, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				538,
 				[
 				],
@@ -27903,7 +23183,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[370, 388, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				539,
 				[
 				],
@@ -27918,7 +23198,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[374, 384, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				540,
 				[
 				],
@@ -27933,7 +23213,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[379, 380, 0, 7.30156, 2.72427, 0, 2.45887, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				541,
 				[
 				],
@@ -27948,7 +23228,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[384, 376, 0, 7.37702, 2.6964, 0, 2.49244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				542,
 				[
 				],
@@ -27963,7 +23243,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[389, 371, 0, 7.52488, 2.64342, 0, 2.5572, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				543,
 				[
 				],
@@ -27978,7 +23258,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[396, 368, 0, 7.72126, 1.76688, 0, 2.64308, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				544,
 				[
 				],
@@ -27993,7 +23273,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[402, 365, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				545,
 				[
 				],
@@ -28008,7 +23288,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[408, 363, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				546,
 				[
 				],
@@ -28023,7 +23303,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[414, 361, 0, 8.15913, 1.67206, 0, 2.85678, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				547,
 				[
 				],
@@ -28038,7 +23318,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[344, 484, 0, 7.61801, 1.79083, 0, 0.54381, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				548,
 				[
 				],
@@ -28053,7 +23333,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[338, 480, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				549,
 				[
 				],
@@ -28068,7 +23348,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[333, 476, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				550,
 				[
 				],
@@ -28083,7 +23363,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[327, 472, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				551,
 				[
 				],
@@ -28098,7 +23378,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[322, 467, 0, 7.18999, 1.89744, 0, 0.733464, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				552,
 				[
 				],
@@ -28113,7 +23393,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[318, 463, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				553,
 				[
 				],
@@ -28128,7 +23408,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[314, 458, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				554,
 				[
 				],
@@ -28143,7 +23423,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[311, 453, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				555,
 				[
 				],
@@ -28158,7 +23438,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[309, 448, 0, 6.40946, 2.12851, 0, 1.20957, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				556,
 				[
 				],
@@ -28173,7 +23453,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[307, 443, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				557,
 				[
 				],
@@ -28188,7 +23468,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[306, 437, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				558,
 				[
 				],
@@ -28203,7 +23483,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[306, 432, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				559,
 				[
 				],
@@ -28218,7 +23498,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[306, 426, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				560,
 				[
 				],
@@ -28233,7 +23513,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[307, 421, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				561,
 				[
 				],
@@ -28248,7 +23528,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[308, 415, 0, 6.27812, 2.17304, 0, 1.76435, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				562,
 				[
 				],
@@ -28263,7 +23543,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[309, 410, 0, 6.44774, 2.11587, 0, 1.96783, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				563,
 				[
 				],
@@ -28278,7 +23558,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[312, 405, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				564,
 				[
 				],
@@ -28293,7 +23573,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[315, 400, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				565,
 				[
 				],
@@ -28308,7 +23588,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[319, 396, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				566,
 				[
 				],
@@ -28323,7 +23603,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[324, 391, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				567,
 				[
 				],
@@ -28338,7 +23618,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[329, 387, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				568,
 				[
 				],
@@ -28353,7 +23633,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[334, 383, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				569,
 				[
 				],
@@ -28368,7 +23648,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[338, 379, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				570,
 				[
 				],
@@ -28383,7 +23663,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[343, 375, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				571,
 				[
 				],
@@ -28398,7 +23678,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[490, 404, 0, 6.36212, 2.14434, 0, -1.88215, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				572,
 				[
 				],
@@ -28413,7 +23693,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[492, 408, 0, 4.56505, 1.89307, 0, -2.41579, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				573,
 				[
 				],
@@ -28428,7 +23708,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[496, 410, 0, 6.26075, 1.68885, 0, -2.81186, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				574,
 				[
 				],
@@ -28443,7 +23723,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[501, 410, 0, 5.75305, 1.63049, 0, 3.01498, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				575,
 				[
 				],
@@ -28458,7 +23738,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[506, 409, 0, 5.71126, 1.64242, 0, 2.95652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				576,
 				[
 				],
@@ -28473,7 +23753,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[511, 408, 0, 5.55078, 1.68991, 0, 2.80919, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				577,
 				[
 				],
@@ -28488,7 +23768,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[516, 406, 0, 5.25527, 1.78493, 0, 2.60878, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				578,
 				[
 				],
@@ -28503,7 +23783,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[519, 403, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				579,
 				[
 				],
@@ -28518,7 +23798,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[522, 400, 0, 4.87083, 1.92582, 0, 2.35825, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				580,
 				[
 				],
@@ -28533,7 +23813,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[525, 396, 0, 4.67862, 2.00493, 0, 2.2136, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				581,
 				[
 				],
@@ -28548,7 +23828,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[527, 393, 0, 4.51976, 2.0754, 0, 2.06784, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				582,
 				[
 				],
@@ -28563,7 +23843,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[530, 389, 0, 4.40891, 2.12758, 0, 1.93476, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				583,
 				[
 				],
@@ -28578,7 +23858,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[531, 385, 0, 4.29666, 2.18316, 0, 1.7006, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				584,
 				[
 				],
@@ -28593,7 +23873,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[531, 381, 0, 4.30629, 2.17828, 0, 1.40721, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				585,
 				[
 				],
@@ -28608,7 +23888,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[530, 377, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				586,
 				[
 				],
@@ -28623,7 +23903,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 374, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				587,
 				[
 				],
@@ -28638,7 +23918,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[527, 371, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				588,
 				[
 				],
@@ -28653,7 +23933,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[525, 367, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				589,
 				[
 				],
@@ -28668,7 +23948,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[523, 364, 0, 4.64685, 2.01864, 0, 0.954589, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				590,
 				[
 				],
@@ -28683,7 +23963,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[520, 361, 0, 4.93025, 1.9026, 0, 0.742507, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				591,
 				[
 				],
@@ -28698,7 +23978,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[517, 358, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				592,
 				[
 				],
@@ -28713,7 +23993,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[513, 356, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				593,
 				[
 				],
@@ -28728,7 +24008,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[508, 355, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				594,
 				[
 				],
@@ -28743,7 +24023,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[505, 353, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				595,
 				[
 				],
@@ -28758,7 +24038,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[492, 403, 0, 5.34384, 1.75535, 0, -2.66561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				596,
 				[
 				],
@@ -28773,7 +24053,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[496, 404, 0, 5.79073, 1.61988, 0, -3.13077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				597,
 				[
 				],
@@ -28788,7 +24068,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[501, 403, 0, 5.31088, 1.76624, 0, 2.64431, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				598,
 				[
 				],
@@ -28803,7 +24083,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[505, 401, 0, 5.14648, 1.82266, 0, 2.5398, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				599,
 				[
 				],
@@ -28818,7 +24098,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[509, 398, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				600,
 				[
 				],
@@ -28833,7 +24113,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[512, 394, 0, 4.71808, 1.98816, 0, 2.24535, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				601,
 				[
 				],
@@ -28848,7 +24128,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[514, 391, 0, 4.33129, 2.16571, 0, 1.79994, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				602,
 				[
 				],
@@ -28863,7 +24143,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[514, 387, 0, 4.28957, 2.18677, 0, 1.4731, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				603,
 				[
 				],
@@ -28878,7 +24158,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[514, 383, 0, 4.35954, 2.15167, 0, 1.28515, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				604,
 				[
 				],
@@ -28893,7 +24173,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[512, 379, 0, 4.47411, 2.09658, 0, 1.12383, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				605,
 				[
 				],
@@ -28908,7 +24188,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[510, 376, 0, 4.64426, 2.01976, 0, 0.956803, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				606,
 				[
 				],
@@ -28923,7 +24203,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[507, 373, 0, 4.94461, 2.57351, 0, 0.732829, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				607,
 				[
 				],
@@ -28938,7 +24218,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[504, 371, 0, 5.20158, 3.43797, 0, 0.566873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				608,
 				[
 				],
@@ -28953,7 +24233,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[501, 369, 0, 5.41168, 4.00614, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				609,
 				[
 				],
@@ -28968,7 +24248,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[496, 367, 0, 5.41168, 4.7975, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				610,
 				[
 				],
@@ -28983,7 +24263,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[492, 365, 0, 5.63791, 5.17872, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				611,
 				[
 				],
@@ -28998,7 +24278,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[487, 364, 0, 5.63791, 5.93959, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				612,
 				[
 				],
@@ -29013,7 +24293,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[482, 362, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				613,
 				[
 				],
@@ -29028,7 +24308,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[478, 362, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				614,
 				[
 				],
@@ -29043,7 +24323,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[474, 361, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				615,
 				[
 				],
@@ -29058,7 +24338,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[472, 358, 0, 7.41995, 2.34078, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				616,
 				[
 				],
@@ -29073,7 +24353,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[471, 361, 0, 5.78307, 3.00333, 0, 1.09341, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				617,
 				[
 				],
@@ -29088,7 +24368,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[533, 437, 0, 7.3539, 1.75087, 0, 2.97231, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				618,
 				[
 				],
@@ -29103,7 +24383,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[540, 435, 0, 7.00147, 1.839, 0, 2.73612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				619,
 				[
 				],
@@ -29118,7 +24398,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[545, 432, 0, 6.73199, 1.91261, 0, 2.599, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				620,
 				[
 				],
@@ -29133,7 +24413,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[551, 428, 0, 6.58376, 1.95567, 0, 2.52583, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				621,
 				[
 				],
@@ -29148,7 +24428,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[554, 425, 0, 6.22652, 2.06788, 0, 2.34108, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				622,
 				[
 				],
@@ -29163,7 +24443,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[558, 420, 0, 5.89026, 2.18593, 0, 2.13171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				623,
 				[
 				],
@@ -29178,7 +24458,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[560, 415, 0, 5.60679, 2.29645, 0, 1.86449, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				624,
 				[
 				],
@@ -29193,7 +24473,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[561, 410, 0, 5.55667, 2.31716, 0, 1.78549, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				625,
 				[
 				],
@@ -29208,7 +24488,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[562, 406, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				626,
 				[
 				],
@@ -29223,7 +24503,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[562, 400, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				627,
 				[
 				],
@@ -29238,7 +24518,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[563, 395, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				628,
 				[
 				],
@@ -29253,7 +24533,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[563, 391, 0, 5.50403, 2.33932, 0, 1.50833, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				629,
 				[
 				],
@@ -29268,7 +24548,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[562, 386, 0, 5.56518, 2.31362, 0, 1.34077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				630,
 				[
 				],
@@ -29283,7 +24563,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[561, 381, 0, 5.64436, 2.28116, 0, 1.22964, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				631,
 				[
 				],
@@ -29298,7 +24578,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[560, 377, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				632,
 				[
 				],
@@ -29313,7 +24593,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[557, 373, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				633,
 				[
 				],
@@ -29328,7 +24608,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[554, 368, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				634,
 				[
 				],
@@ -29343,7 +24623,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[551, 365, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				635,
 				[
 				],
@@ -29358,7 +24638,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[548, 361, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				636,
 				[
 				],
@@ -29373,7 +24653,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[544, 357, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				637,
 				[
 				],
@@ -29388,7 +24668,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[539, 353, 0, 6.70569, 1.92011, 0, 0.555578, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				638,
 				[
 				],
@@ -29403,7 +24683,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[534, 351, 0, 7.00063, 1.83922, 0, 0.405918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				639,
 				[
 				],
@@ -29418,7 +24698,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 348, 0, 7.11273, 1.81023, 0, 0.343436, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				640,
 				[
 				],
@@ -29433,7 +24713,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[522, 346, 0, 7.34314, 1.75343, 0, 0.179855, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				641,
 				[
 				],
@@ -29448,7 +24728,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[517, 346, 0, 7.43951, 1.73072, 0, -0.0135056, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				642,
 				[
 				],
@@ -29463,7 +24743,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[512, 346, 0, 7.28115, 1.76836, 0, -0.23261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				643,
 				[
 				],
@@ -29478,7 +24758,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[507, 348, 0, 6.5014, 1.98045, 0, -0.656794, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				644,
 				[
 				],
@@ -29493,7 +24773,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[505, 350, 0, 5.87407, 2.19195, 0, -1.02172, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				645,
 				[
 				],
@@ -29508,7 +24788,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[508, 347, 0, 4.80617, 1.86229, 0, -0.451343, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				646,
 				[
 				],
@@ -29523,7 +24803,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[533, 439, 0, 4.82228, 1.85607, 0, -2.70221, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				647,
 				[
 				],
@@ -29538,7 +24818,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[537, 440, 0, 5.14672, 1.73906, 0, -3.03265, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				648,
 				[
 				],
@@ -29553,7 +24833,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[542, 440, 0, 5.12021, 1.74807, 0, 2.98459, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				649,
 				[
 				],
@@ -29568,7 +24848,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[547, 439, 0, 4.99675, 1.79126, 0, 2.84412, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				650,
 				[
 				],
@@ -29583,7 +24863,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[551, 437, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				651,
 				[
 				],
@@ -29598,7 +24878,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[554, 436, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				652,
 				[
 				],
@@ -29613,7 +24893,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[558, 434, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				653,
 				[
 				],
@@ -29628,7 +24908,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[562, 432, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				654,
 				[
 				],
@@ -29643,7 +24923,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[566, 430, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				655,
 				[
 				],
@@ -29658,7 +24938,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[569, 428, 0, 4.66046, 1.92051, 0, 2.58533, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				656,
 				[
 				],
@@ -29673,7 +24953,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[573, 425, 0, 5.66247, 1.94285, 0, 2.54732, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				657,
 				[
 				],
@@ -29688,7 +24968,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[577, 422, 0, 5.38358, 2.0435, 0, 2.38139, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				658,
 				[
 				],
@@ -29703,7 +24983,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[580, 417, 0, 7.65072, 2.23615, 0, 2.02652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				659,
 				[
 				],
@@ -29718,7 +24998,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[582, 410, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				660,
 				[
 				],
@@ -29733,7 +25013,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[584, 404, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				661,
 				[
 				],
@@ -29748,7 +25028,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[585, 398, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				662,
 				[
 				],
@@ -29763,7 +25043,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[586, 394, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				663,
 				[
 				],
@@ -29778,7 +25058,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[587, 390, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				664,
 				[
 				],
@@ -29793,7 +25073,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[587, 385, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				665,
 				[
 				],
@@ -29808,7 +25088,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[588, 380, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				666,
 				[
 				],
@@ -29823,7 +25103,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[588, 374, 0, 5.44802, 2.33867, 0, 1.64244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				667,
 				[
 				],
@@ -29838,7 +25118,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[588, 369, 0, 5.44174, 2.34137, 0, 1.5643, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				668,
 				[
 				],
@@ -29853,7 +25133,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[588, 365, 0, 5.50299, 2.31531, 0, 1.34798, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				669,
 				[
 				],
@@ -29868,7 +25148,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[586, 361, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				670,
 				[
 				],
@@ -29883,7 +25163,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[584, 356, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				671,
 				[
 				],
@@ -29898,7 +25178,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[581, 352, 0, 6.14082, 2.07483, 0, 0.812098, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				672,
 				[
 				],
@@ -29913,7 +25193,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[578, 349, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				673,
 				[
 				],
@@ -29928,7 +25208,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[576, 346, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				674,
 				[
 				],
@@ -29943,7 +25223,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[457, 551, 0, 9.65597, 0.847169, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				675,
 				[
 				],
@@ -29958,7 +25238,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[449, 548, 0, 9.65597, 2.15627, 0, 0.328673, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				676,
 				[
 				],
@@ -29973,7 +25253,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[442, 545, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				677,
 				[
 				],
@@ -29988,7 +25268,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[434, 542, 0, 9.30381, 2.68268, 0, 0.470004, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				678,
 				[
 				],
@@ -30003,7 +25283,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[427, 537, 0, 8.78195, 2.8421, 0, 0.661712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				679,
 				[
 				],
@@ -30018,7 +25298,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[422, 531, 0, 8.28046, 3.01423, 0, 0.860645, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				680,
 				[
 				],
@@ -30033,7 +25313,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[417, 526, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				681,
 				[
 				],
@@ -30048,7 +25328,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[414, 520, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				682,
 				[
 				],
@@ -30063,7 +25343,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 514, 0, 7.90246, 3.15841, 0, 1.04631, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				683,
 				[
 				],
@@ -30078,7 +25358,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[408, 508, 0, 7.64349, 3.26542, 0, 1.22301, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				684,
 				[
 				],
@@ -30093,7 +25373,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[405, 501, 0, 7.51748, 3.32015, 0, 1.35567, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				685,
 				[
 				],
@@ -30108,7 +25388,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[403, 494, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				686,
 				[
 				],
@@ -30123,7 +25403,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[405, 486, 0, 7.45565, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				687,
 				[
 				],
@@ -30138,7 +25418,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[405, 480, 0, 7.90903, 3.34769, 0, 1.66903, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				688,
 				[
 				],
@@ -30153,7 +25433,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[407, 472, 0, 7.17068, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				689,
 				[
 				],
@@ -30168,7 +25448,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[409, 466, 0, 7.47768, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				690,
 				[
 				],
@@ -30183,7 +25463,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[412, 460, 0, 7.17058, 3.25186, 0, 1.94477, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				691,
 				[
 				],
@@ -30198,7 +25478,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[415, 455, 0, 6.8453, 3.05109, 0, 2.2363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				692,
 				[
 				],
@@ -30213,7 +25493,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[418, 450, 0, 6.6124, 3.15856, 0, 2.09506, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				693,
 				[
 				],
@@ -30228,7 +25508,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[422, 445, 0, 7.08798, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				694,
 				[
 				],
@@ -30243,7 +25523,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[427, 441, 0, 9.31068, 2.94663, 0, 2.36014, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				695,
 				[
 				],
@@ -30258,7 +25538,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[469, 565, 0, 8.28326, 1.72008, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				696,
 				[
 				],
@@ -30273,7 +25553,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[462, 564, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				697,
 				[
 				],
@@ -30288,7 +25568,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[454, 562, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				698,
 				[
 				],
@@ -30303,7 +25583,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[447, 561, 0, 8.28326, 2.52143, 0, 0.203339, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				699,
 				[
 				],
@@ -30318,7 +25598,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[440, 558, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				700,
 				[
 				],
@@ -30333,7 +25613,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[432, 565, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				701,
 				[
 				],
@@ -30348,7 +25628,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[428, 562, 0, 7.84414, 2.66258, 0, 0.443418, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				702,
 				[
 				],
@@ -30363,7 +25643,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[422, 559, 0, 7.67361, 2.72175, 0, 0.519495, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				703,
 				[
 				],
@@ -30378,7 +25658,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[417, 555, 0, 7.65591, 2.72804, 0, 0.52725, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				704,
 				[
 				],
@@ -30393,7 +25673,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[411, 551, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				705,
 				[
 				],
@@ -30408,7 +25688,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[407, 548, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				706,
 				[
 				],
@@ -30423,7 +25703,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[403, 544, 0, 7.0093, 2.97971, 0, 0.819873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				707,
 				[
 				],
@@ -30438,7 +25718,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[399, 540, 0, 7.36485, 2.83586, 0, 0.654541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				708,
 				[
 				],
@@ -30453,7 +25733,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[394, 535, 0, 7.97055, 2.95633, 0, 0.792677, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				709,
 				[
 				],
@@ -30468,7 +25748,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[390, 530, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				710,
 				[
 				],
@@ -30483,7 +25763,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[387, 525, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				711,
 				[
 				],
@@ -30498,7 +25778,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[384, 519, 0, 6.67296, 4.85607, 0, 1.00667, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				712,
 				[
 				],
@@ -30513,7 +25793,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[382, 514, 0, 6.37771, 5.08087, 0, 1.24218, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				713,
 				[
 				],
@@ -30528,7 +25808,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[381, 509, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				714,
 				[
 				],
@@ -30543,7 +25823,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[380, 503, 0, 6.23219, 5.82692, 0, 1.50045, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				715,
 				[
 				],
@@ -30558,7 +25838,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[380, 498, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				716,
 				[
 				],
@@ -30573,7 +25853,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[380, 492, 0, 6.23903, 6.44652, 0, 1.66976, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				717,
 				[
 				],
@@ -30588,7 +25868,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[381, 486, 0, 7.05185, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				718,
 				[
 				],
@@ -30603,7 +25883,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[384, 480, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				719,
 				[
 				],
@@ -30618,7 +25898,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[386, 475, 0, 6.44894, 6.23669, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				720,
 				[
 				],
@@ -30633,7 +25913,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[389, 470, 0, 6.44894, 5.46372, 0, 1.9689, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				721,
 				[
 				],
@@ -30648,7 +25928,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[391, 465, 0, 6.70411, 5.25576, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				722,
 				[
 				],
@@ -30663,7 +25943,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[394, 461, 0, 6.70411, 4.47031, 0, 2.15442, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				723,
 				[
 				],
@@ -30678,7 +25958,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[398, 457, 0, 6.96748, 4.30133, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				724,
 				[
 				],
@@ -30693,7 +25973,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[402, 452, 0, 6.96748, 3.8348, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				725,
 				[
 				],
@@ -30708,7 +25988,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[406, 447, 0, 6.96748, 3.05601, 0, 2.3007, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				726,
 				[
 				],
@@ -30723,7 +26003,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[410, 443, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				727,
 				[
 				],
@@ -30738,7 +26018,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[415, 439, 0, 7.24035, 2.94084, 0, 2.43122, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				728,
 				[
 				],
@@ -30753,7 +26033,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[419, 436, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				729,
 				[
 				],
@@ -30768,7 +26048,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[422, 434, 0, 7.60018, 2.8016, 0, 2.59001, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				730,
 				[
 				],
@@ -30783,7 +26063,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[399, 564, 0, 7.81826, 0.962684, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				731,
 				[
 				],
@@ -30798,7 +26078,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[392, 561, 0, 7.81826, 1.61341, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				732,
 				[
 				],
@@ -30813,7 +26093,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[387, 557, 0, 7.81826, 2.07631, 0, 0.455184, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				733,
 				[
 				],
@@ -30828,7 +26108,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[380, 554, 0, 7.68974, 2.11101, 0, 0.51241, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				734,
 				[
 				],
@@ -30843,7 +26123,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[374, 550, 0, 7.61691, 2.13119, 0, 0.544291, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				735,
 				[
 				],
@@ -30858,7 +26138,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[369, 547, 0, 7.40506, 2.19217, 0, 0.636796, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				736,
 				[
 				],
@@ -30873,7 +26153,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[363, 542, 0, 7.17154, 2.26355, 0, 0.742017, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				737,
 				[
 				],
@@ -30888,7 +26168,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[359, 538, 0, 6.93029, 2.34234, 0, 0.859987, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				738,
 				[
 				],
@@ -30903,7 +26183,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[356, 533, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				739,
 				[
 				],
@@ -30918,7 +26198,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[353, 528, 0, 6.65351, 2.43979, 0, 1.01918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				740,
 				[
 				],
@@ -30933,7 +26213,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[350, 523, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				741,
 				[
 				],
@@ -30948,7 +26228,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[348, 518, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				742,
 				[
 				],
@@ -30963,7 +26243,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[346, 512, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				743,
 				[
 				],
@@ -30978,7 +26258,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[345, 507, 0, 6.39687, 2.53767, 0, 1.22214, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				744,
 				[
 				],
@@ -30993,7 +26273,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[344, 504, 0, 6.27176, 2.58829, 0, 1.38924, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				745,
 				[
 				],
@@ -31008,7 +26288,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[343, 499, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				746,
 				[
 				],
@@ -31023,7 +26303,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[344, 495, 0, 6.22696, 2.60691, 0, 1.60615, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				747,
 				[
 				],
@@ -31038,7 +26318,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[344, 490, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				748,
 				[
 				],
@@ -31053,7 +26333,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[345, 484, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				749,
 				[
 				],
@@ -31068,7 +26348,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[347, 479, 0, 6.32277, 2.5674, 0, 1.83363, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				750,
 				[
 				],
@@ -31083,7 +26363,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[349, 474, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				751,
 				[
 				],
@@ -31098,7 +26378,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[351, 469, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				752,
 				[
 				],
@@ -31113,7 +26393,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[354, 464, 0, 6.57118, 2.47035, 0, 2.0662, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				753,
 				[
 				],
@@ -31128,7 +26408,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[358, 460, 0, 7.11302, 2.28217, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				754,
 				[
 				],
@@ -31143,7 +26423,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[363, 455, 0, 7.37963, 2.19972, 0, 2.49359, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				755,
 				[
 				],
@@ -31158,7 +26438,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[368, 452, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				756,
 				[
 				],
@@ -31173,7 +26453,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[372, 448, 0, 7.11302, 2.79648, 0, 2.37209, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				757,
 				[
 				],
@@ -31188,7 +26468,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[377, 444, 0, 7.30156, 2.72427, 0, 2.45887, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				758,
 				[
 				],
@@ -31203,7 +26483,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[382, 440, 0, 7.37702, 2.6964, 0, 2.49244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				759,
 				[
 				],
@@ -31218,7 +26498,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[387, 435, 0, 7.52488, 2.64342, 0, 2.5572, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				760,
 				[
 				],
@@ -31233,7 +26513,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[394, 432, 0, 7.72126, 1.76688, 0, 2.64308, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				761,
 				[
 				],
@@ -31248,7 +26528,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[400, 429, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				762,
 				[
 				],
@@ -31263,7 +26543,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[406, 427, 0, 7.93267, 1.7198, 0, 2.73936, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				763,
 				[
 				],
@@ -31278,7 +26558,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[412, 425, 0, 8.15913, 1.67206, 0, 2.85678, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				764,
 				[
 				],
@@ -31293,7 +26573,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[342, 548, 0, 7.61801, 1.79083, 0, 0.54381, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				765,
 				[
 				],
@@ -31308,7 +26588,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[336, 544, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				766,
 				[
 				],
@@ -31323,7 +26603,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[331, 540, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				767,
 				[
 				],
@@ -31338,7 +26618,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[325, 536, 0, 7.40323, 1.84279, 0, 0.637598, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				768,
 				[
 				],
@@ -31353,7 +26633,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[320, 531, 0, 7.18999, 1.89744, 0, 0.733464, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				769,
 				[
 				],
@@ -31368,7 +26648,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[316, 527, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				770,
 				[
 				],
@@ -31383,7 +26663,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[312, 522, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				771,
 				[
 				],
@@ -31398,7 +26678,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[309, 517, 0, 6.75839, 2.01861, 0, 0.954541, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				772,
 				[
 				],
@@ -31413,7 +26693,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[307, 512, 0, 6.40946, 2.12851, 0, 1.20957, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				773,
 				[
 				],
@@ -31428,7 +26708,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[305, 507, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				774,
 				[
 				],
@@ -31443,7 +26723,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[304, 501, 0, 6.25505, 2.18105, 0, 1.42542, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				775,
 				[
 				],
@@ -31458,7 +26738,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[304, 496, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				776,
 				[
 				],
@@ -31473,7 +26753,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[304, 490, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				777,
 				[
 				],
@@ -31488,7 +26768,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[305, 485, 0, 6.23522, 2.18799, 0, 1.65503, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				778,
 				[
 				],
@@ -31503,7 +26783,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[306, 479, 0, 6.27812, 2.17304, 0, 1.76435, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				779,
 				[
 				],
@@ -31518,7 +26798,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[307, 474, 0, 6.44774, 2.11587, 0, 1.96783, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				780,
 				[
 				],
@@ -31533,7 +26813,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[310, 469, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				781,
 				[
 				],
@@ -31548,7 +26828,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[313, 464, 0, 6.65557, 2.0498, 0, 2.12375, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				782,
 				[
 				],
@@ -31563,7 +26843,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[317, 460, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				783,
 				[
 				],
@@ -31578,7 +26858,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[322, 455, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				784,
 				[
 				],
@@ -31593,7 +26873,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[327, 451, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				785,
 				[
 				],
@@ -31608,7 +26888,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[332, 447, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				786,
 				[
 				],
@@ -31623,7 +26903,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[336, 443, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				787,
 				[
 				],
@@ -31638,7 +26918,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[341, 439, 0, 7.19971, 1.89488, 0, 2.41261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				788,
 				[
 				],
@@ -31653,7 +26933,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[488, 468, 0, 6.36212, 2.14434, 0, -1.88215, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				789,
 				[
 				],
@@ -31668,7 +26948,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[490, 472, 0, 4.56505, 1.89307, 0, -2.41579, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				790,
 				[
 				],
@@ -31683,7 +26963,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[494, 474, 0, 6.26075, 1.68885, 0, -2.81186, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				791,
 				[
 				],
@@ -31698,7 +26978,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[499, 474, 0, 5.75305, 1.63049, 0, 3.01498, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				792,
 				[
 				],
@@ -31713,7 +26993,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[504, 473, 0, 5.71126, 1.64242, 0, 2.95652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				793,
 				[
 				],
@@ -31728,7 +27008,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[509, 472, 0, 5.55078, 1.68991, 0, 2.80919, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				794,
 				[
 				],
@@ -31743,7 +27023,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[514, 470, 0, 5.25527, 1.78493, 0, 2.60878, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				795,
 				[
 				],
@@ -31758,7 +27038,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[517, 467, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				796,
 				[
 				],
@@ -31773,7 +27053,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[520, 464, 0, 4.87083, 1.92582, 0, 2.35825, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				797,
 				[
 				],
@@ -31788,7 +27068,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[523, 460, 0, 4.67862, 2.00493, 0, 2.2136, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				798,
 				[
 				],
@@ -31803,7 +27083,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[525, 457, 0, 4.51976, 2.0754, 0, 2.06784, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				799,
 				[
 				],
@@ -31818,7 +27098,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 453, 0, 4.40891, 2.12758, 0, 1.93476, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				800,
 				[
 				],
@@ -31833,7 +27113,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[529, 449, 0, 4.29666, 2.18316, 0, 1.7006, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				801,
 				[
 				],
@@ -31848,7 +27128,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[529, 445, 0, 4.30629, 2.17828, 0, 1.40721, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				802,
 				[
 				],
@@ -31863,7 +27143,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[528, 441, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				803,
 				[
 				],
@@ -31878,7 +27158,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[526, 438, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				804,
 				[
 				],
@@ -31893,7 +27173,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[525, 435, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				805,
 				[
 				],
@@ -31908,7 +27188,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[523, 431, 0, 4.45681, 2.10472, 0, 1.1443, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				806,
 				[
 				],
@@ -31923,7 +27203,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[521, 428, 0, 4.64685, 2.01864, 0, 0.954589, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				807,
 				[
 				],
@@ -31938,7 +27218,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[518, 425, 0, 4.93025, 1.9026, 0, 0.742507, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				808,
 				[
 				],
@@ -31953,7 +27233,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[515, 422, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				809,
 				[
 				],
@@ -31968,7 +27248,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[511, 420, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				810,
 				[
 				],
@@ -31983,7 +27263,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[506, 419, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				811,
 				[
 				],
@@ -31998,7 +27278,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[503, 417, 0, 5.39831, 1.73764, 0, 0.440181, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				812,
 				[
 				],
@@ -32013,7 +27293,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[490, 467, 0, 5.34384, 1.75535, 0, -2.66561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				813,
 				[
 				],
@@ -32028,7 +27308,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[494, 468, 0, 5.79073, 1.61988, 0, -3.13077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				814,
 				[
 				],
@@ -32043,7 +27323,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[499, 467, 0, 5.31088, 1.76624, 0, 2.64431, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				815,
 				[
 				],
@@ -32058,7 +27338,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[503, 465, 0, 5.14648, 1.82266, 0, 2.5398, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				816,
 				[
 				],
@@ -32073,7 +27353,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[507, 462, 0, 5.02894, 1.86527, 0, 2.46444, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				817,
 				[
 				],
@@ -32088,7 +27368,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[510, 458, 0, 4.71808, 1.98816, 0, 2.24535, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				818,
 				[
 				],
@@ -32103,7 +27383,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[512, 455, 0, 4.33129, 2.16571, 0, 1.79994, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				819,
 				[
 				],
@@ -32118,7 +27398,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[512, 451, 0, 4.28957, 2.18677, 0, 1.4731, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				820,
 				[
 				],
@@ -32133,7 +27413,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[512, 447, 0, 4.35954, 2.15167, 0, 1.28515, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				821,
 				[
 				],
@@ -32148,7 +27428,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[510, 443, 0, 4.47411, 2.09658, 0, 1.12383, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				822,
 				[
 				],
@@ -32163,7 +27443,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[508, 440, 0, 4.64426, 2.01976, 0, 0.956803, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				823,
 				[
 				],
@@ -32178,7 +27458,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[505, 437, 0, 4.94461, 2.57351, 0, 0.732829, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				824,
 				[
 				],
@@ -32193,7 +27473,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[502, 435, 0, 5.20158, 3.43797, 0, 0.566873, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				825,
 				[
 				],
@@ -32208,7 +27488,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[499, 433, 0, 5.41168, 4.00614, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				826,
 				[
 				],
@@ -32223,7 +27503,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[494, 431, 0, 5.41168, 4.7975, 0, 0.431248, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				827,
 				[
 				],
@@ -32238,7 +27518,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[490, 429, 0, 5.63791, 5.17872, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				828,
 				[
 				],
@@ -32253,7 +27533,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[485, 428, 0, 5.63791, 5.93959, 0, 0.260395, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				829,
 				[
 				],
@@ -32268,7 +27548,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[480, 426, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				830,
 				[
 				],
@@ -32283,7 +27563,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[476, 426, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				831,
 				[
 				],
@@ -32298,7 +27578,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[472, 425, 0, 7.41995, 6.23676, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				832,
 				[
 				],
@@ -32313,7 +27593,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[470, 422, 0, 7.41995, 2.34078, 0, 0.0809591, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				833,
 				[
 				],
@@ -32328,7 +27608,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[469, 425, 0, 5.78307, 3.00333, 0, 1.09341, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				834,
 				[
 				],
@@ -32343,7 +27623,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[531, 501, 0, 7.3539, 1.75087, 0, 2.97231, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				835,
 				[
 				],
@@ -32358,7 +27638,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[538, 499, 0, 7.00147, 1.839, 0, 2.73612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				836,
 				[
 				],
@@ -32373,7 +27653,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[543, 496, 0, 6.73199, 1.91261, 0, 2.599, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				837,
 				[
 				],
@@ -32388,7 +27668,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[549, 492, 0, 6.58376, 1.95567, 0, 2.52583, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				838,
 				[
 				],
@@ -32403,7 +27683,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[552, 489, 0, 6.22652, 2.06788, 0, 2.34108, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				839,
 				[
 				],
@@ -32418,7 +27698,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[556, 484, 0, 5.89026, 2.18593, 0, 2.13171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				840,
 				[
 				],
@@ -32433,7 +27713,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[558, 479, 0, 5.60679, 2.29645, 0, 1.86449, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				841,
 				[
 				],
@@ -32448,7 +27728,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[559, 474, 0, 5.55667, 2.31716, 0, 1.78549, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				842,
 				[
 				],
@@ -32463,7 +27743,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[560, 470, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				843,
 				[
 				],
@@ -32478,7 +27758,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[560, 464, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				844,
 				[
 				],
@@ -32493,7 +27773,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[561, 459, 0, 5.50784, 2.3377, 0, 1.65419, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				845,
 				[
 				],
@@ -32508,7 +27788,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[561, 455, 0, 5.50403, 2.33932, 0, 1.50833, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				846,
 				[
 				],
@@ -32523,7 +27803,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[560, 450, 0, 5.56518, 2.31362, 0, 1.34077, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				847,
 				[
 				],
@@ -32538,7 +27818,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[559, 445, 0, 5.64436, 2.28116, 0, 1.22964, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				848,
 				[
 				],
@@ -32553,7 +27833,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[558, 441, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				849,
 				[
 				],
@@ -32568,7 +27848,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[555, 437, 0, 5.86067, 2.19697, 0, 1.03171, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				850,
 				[
 				],
@@ -32583,7 +27863,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[552, 432, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				851,
 				[
 				],
@@ -32598,7 +27878,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[549, 429, 0, 6.08789, 2.11497, 0, 0.880278, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				852,
 				[
 				],
@@ -32613,7 +27893,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[546, 425, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				853,
 				[
 				],
@@ -32628,7 +27908,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[542, 421, 0, 6.30359, 2.0426, 0, 0.758719, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				854,
 				[
 				],
@@ -32643,7 +27923,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[537, 417, 0, 6.70569, 1.92011, 0, 0.555578, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				855,
 				[
 				],
@@ -32658,7 +27938,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[532, 415, 0, 7.00063, 1.83922, 0, 0.405918, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				856,
 				[
 				],
@@ -32673,7 +27953,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[526, 412, 0, 7.11273, 1.81023, 0, 0.343436, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				857,
 				[
 				],
@@ -32688,7 +27968,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[520, 410, 0, 7.34314, 1.75343, 0, 0.179855, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				858,
 				[
 				],
@@ -32703,7 +27983,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[515, 410, 0, 7.43951, 1.73072, 0, -0.0135056, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				859,
 				[
 				],
@@ -32718,7 +27998,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[510, 410, 0, 7.28115, 1.76836, 0, -0.23261, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				860,
 				[
 				],
@@ -32733,7 +28013,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[505, 412, 0, 6.5014, 1.98045, 0, -0.656794, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				861,
 				[
 				],
@@ -32748,7 +28028,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[503, 414, 0, 5.87407, 2.19195, 0, -1.02172, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				862,
 				[
 				],
@@ -32763,7 +28043,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[506, 411, 0, 4.80617, 1.86229, 0, -0.451343, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				863,
 				[
 				],
@@ -32778,7 +28058,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[531, 503, 0, 4.82228, 1.85607, 0, -2.70221, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				864,
 				[
 				],
@@ -32793,7 +28073,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[535, 504, 0, 5.14672, 1.73906, 0, -3.03265, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				865,
 				[
 				],
@@ -32808,7 +28088,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[540, 504, 0, 5.12021, 1.74807, 0, 2.98459, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				866,
 				[
 				],
@@ -32823,7 +28103,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[545, 503, 0, 4.99675, 1.79126, 0, 2.84412, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				867,
 				[
 				],
@@ -32838,7 +28118,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[549, 501, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				868,
 				[
 				],
@@ -32853,7 +28133,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[552, 500, 0, 4.90191, 1.82591, 0, 2.76344, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				869,
 				[
 				],
@@ -32868,7 +28148,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[556, 498, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				870,
 				[
 				],
@@ -32883,7 +28163,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[560, 496, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				871,
 				[
 				],
@@ -32898,7 +28178,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[564, 494, 0, 4.77462, 1.87459, 0, 2.66712, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				872,
 				[
 				],
@@ -32913,7 +28193,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[567, 492, 0, 4.66046, 1.92051, 0, 2.58533, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				873,
 				[
 				],
@@ -32928,7 +28208,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[571, 489, 0, 5.66247, 1.94285, 0, 2.54732, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				874,
 				[
 				],
@@ -32943,7 +28223,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[575, 486, 0, 5.38358, 2.0435, 0, 2.38139, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				875,
 				[
 				],
@@ -32958,7 +28238,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[578, 481, 0, 7.65072, 2.23615, 0, 2.02652, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				876,
 				[
 				],
@@ -32973,7 +28253,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[580, 474, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				877,
 				[
 				],
@@ -32988,7 +28268,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[582, 468, 0, 7.44179, 2.29893, 0, 1.85612, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				878,
 				[
 				],
@@ -33003,7 +28283,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[583, 462, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				879,
 				[
 				],
@@ -33018,7 +28298,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[584, 458, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				880,
 				[
 				],
@@ -33033,7 +28313,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[585, 454, 0, 5.47224, 2.32832, 0, 1.72811, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				881,
 				[
 				],
@@ -33048,7 +28328,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[585, 449, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				882,
 				[
 				],
@@ -33063,7 +28343,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[586, 444, 0, 5.46158, 2.33286, 0, 1.69773, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				883,
 				[
 				],
@@ -33078,7 +28358,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[586, 438, 0, 5.44802, 2.33867, 0, 1.64244, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				884,
 				[
 				],
@@ -33093,7 +28373,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[586, 433, 0, 5.44174, 2.34137, 0, 1.5643, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				885,
 				[
 				],
@@ -33108,7 +28388,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[586, 429, 0, 5.50299, 2.31531, 0, 1.34798, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				886,
 				[
 				],
@@ -33123,7 +28403,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[584, 425, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				887,
 				[
 				],
@@ -33138,7 +28418,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[582, 420, 0, 5.70134, 2.23476, 0, 1.11192, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				888,
 				[
 				],
@@ -33153,7 +28433,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[579, 416, 0, 6.14082, 2.07483, 0, 0.812098, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				889,
 				[
 				],
@@ -33168,7 +28448,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[576, 413, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				890,
 				[
 				],
@@ -33183,7 +28463,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[574, 410, 0, 5.94875, 2.14181, 0, 0.927561, 1, 0.5, 0.5, 0, 0, []],
-				21,
+				11,
 				891,
 				[
 				],
@@ -33198,7 +28478,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[106, 847, 0, 76.0626, 133.539, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				12,
+				6,
 				0,
 				[
 				],
@@ -33215,7 +28495,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[674, 845, 0, 69.1478, 130.07, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				14,
+				7,
 				13,
 				[
 				],
@@ -33232,7 +28512,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[393, 842, 0, 6.91478, 145.678, 0, 0, 0, 0.5, 0.5, 0, 0, []],
-				2,
+				1,
 				2,
 				[
 				],
@@ -33247,7 +28527,7 @@ cr.getProjectModel = function() { return [
 			]
 ,			[
 				[358, 453, 0, 230.426, 238.281, 0, 0, 1, 0.026, 0.886, 0, 0, []],
-				33,
+				17,
 				12,
 				[
 				],
@@ -33285,7 +28565,7 @@ cr.getProjectModel = function() { return [
 		[
 			[
 				null,
-				22,
+				12,
 				234,
 				[
 				],
@@ -33416,7 +28696,7 @@ false,false,9733146001977147
 			8700764227709858,
 			[
 			[
-				4,
+				2,
 				cr.behaviors.EightDir.prototype.cnds.IsMoving,
 				"8Direction",
 				0,
@@ -33428,7 +28708,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				4,
+				2,
 				cr.behaviors.EightDir.prototype.acts.Reverse,
 				"8Direction",
 				4813974523599697
@@ -33447,7 +28727,7 @@ false,false,9733146001977147
 					7,
 					[
 						20,
-						2,
+						1,
 						cr.plugins_.Sprite.prototype.exps.X,
 						false,
 						null
@@ -33469,7 +28749,7 @@ false,false,9733146001977147
 					7,
 					[
 						20,
-						4,
+						2,
 						cr.plugins_.Sprite.prototype.exps.X,
 						false,
 						null
@@ -33486,25 +28766,19 @@ false,false,9733146001977147
 			3806978103800793,
 			[
 			[
-				17,
-				cr.plugins_.Touch.prototype.cnds.IsTouchingObject,
+				8,
+				cr.plugins_.Touch.prototype.cnds.IsInTouch,
 				null,
 				0,
 				false,
 				false,
 				false,
 				761011421820008
-				,[
-				[
-					4,
-					19
-				]
-				]
 			]
 			],
 			[
 			[
-				4,
+				2,
 				cr.behaviors.EightDir.prototype.acts.SimulateControl,
 				"8Direction",
 				7780474272636368
@@ -33524,7 +28798,7 @@ false,false,9733146001977147
 			4486948198242092,
 			[
 			[
-				17,
+				8,
 				cr.plugins_.Touch.prototype.cnds.IsTouchingObject,
 				null,
 				0,
@@ -33535,14 +28809,14 @@ false,false,9733146001977147
 				,[
 				[
 					4,
-					18
+					9
 				]
 				]
 			]
 			],
 			[
 			[
-				4,
+				2,
 				cr.behaviors.EightDir.prototype.acts.SimulateControl,
 				"8Direction",
 				9328867896726971
@@ -33583,13 +28857,13 @@ false,false,9733146001977147
 				,[
 				[
 					4,
-					21
+					11
 				]
 ,				[
 					7,
 					[
 						20,
-						21,
+						11,
 						cr.plugins_.Sprite.prototype.exps.UID,
 						false,
 						null
@@ -33604,7 +28878,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				22,
+				12,
 				cr.plugins_.Arr.prototype.acts.Push,
 				null,
 				9139446744787424
@@ -33617,7 +28891,7 @@ false,false,9733146001977147
 					7,
 					[
 						20,
-						21,
+						11,
 						cr.plugins_.Sprite.prototype.exps.X,
 						false,
 						null
@@ -33630,7 +28904,7 @@ false,false,9733146001977147
 				]
 			]
 ,			[
-				22,
+				12,
 				cr.plugins_.Arr.prototype.acts.Push,
 				null,
 				3580569893178904
@@ -33643,7 +28917,7 @@ false,false,9733146001977147
 					7,
 					[
 						20,
-						21,
+						11,
 						cr.plugins_.Sprite.prototype.exps.Y,
 						false,
 						null
@@ -33676,7 +28950,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				21,
+				11,
 				cr.plugins_.Sprite.prototype.acts.Destroy,
 				null,
 				7533080112053269
@@ -33754,7 +29028,7 @@ false,false,9733146001977147
 						0,
 						[
 							20,
-							4,
+							2,
 							cr.plugins_.Sprite.prototype.exps.X,
 							false,
 							null
@@ -33766,7 +29040,7 @@ false,false,9733146001977147
 							5,
 							[
 								20,
-								2,
+								1,
 								cr.plugins_.Sprite.prototype.exps.X,
 								false,
 								null
@@ -33781,7 +29055,7 @@ false,false,9733146001977147
 						0,
 						[
 							20,
-							2,
+							1,
 							cr.plugins_.Sprite.prototype.exps.X,
 							false,
 							null
@@ -33792,7 +29066,7 @@ false,false,9733146001977147
 				],
 				[
 				[
-					11,
+					5,
 					cr.plugins_.Sprite.prototype.acts.SetVisible,
 					null,
 					4576658689867049
@@ -33804,7 +29078,7 @@ false,false,9733146001977147
 					]
 				]
 ,				[
-					10,
+					4,
 					cr.plugins_.Sprite.prototype.acts.SetVisible,
 					null,
 					1251686205058164
@@ -33856,7 +29130,7 @@ false,false,9733146001977147
 						0,
 						[
 							20,
-							4,
+							2,
 							cr.plugins_.Sprite.prototype.exps.X,
 							false,
 							null
@@ -33868,7 +29142,7 @@ false,false,9733146001977147
 							4,
 							[
 								20,
-								2,
+								1,
 								cr.plugins_.Sprite.prototype.exps.X,
 								false,
 								null
@@ -33885,7 +29159,7 @@ false,false,9733146001977147
 							4,
 							[
 								20,
-								2,
+								1,
 								cr.plugins_.Sprite.prototype.exps.X,
 								false,
 								null
@@ -33901,7 +29175,7 @@ false,false,9733146001977147
 				],
 				[
 				[
-					11,
+					5,
 					cr.plugins_.Sprite.prototype.acts.SetVisible,
 					null,
 					1344052363759293
@@ -33913,7 +29187,7 @@ false,false,9733146001977147
 					]
 				]
 ,				[
-					10,
+					4,
 					cr.plugins_.Sprite.prototype.acts.SetVisible,
 					null,
 					7800154530863496
@@ -33952,7 +29226,7 @@ false,false,9733146001977147
 				6001511591276998,
 				[
 				[
-					4,
+					2,
 					cr.plugins_.Sprite.prototype.cnds.OnCollision,
 					null,
 					0,
@@ -33963,14 +29237,14 @@ false,false,9733146001977147
 					,[
 					[
 						4,
-						12
+						6
 					]
 					]
 				]
 				],
 				[
 				[
-					6,
+					3,
 					cr.plugins_.Function.prototype.acts.CallFunction,
 					null,
 					354343753581624
@@ -33996,7 +29270,7 @@ false,false,9733146001977147
 				5459657443102947,
 				[
 				[
-					4,
+					2,
 					cr.plugins_.Sprite.prototype.cnds.OnCollision,
 					null,
 					0,
@@ -34007,14 +29281,14 @@ false,false,9733146001977147
 					,[
 					[
 						4,
-						14
+						7
 					]
 					]
 				]
 				],
 				[
 				[
-					6,
+					3,
 					cr.plugins_.Function.prototype.acts.CallFunction,
 					null,
 					458316008351835
@@ -34040,7 +29314,7 @@ false,false,9733146001977147
 				9074521573158083,
 				[
 				[
-					4,
+					2,
 					cr.plugins_.Sprite.prototype.cnds.IsOverlapping,
 					null,
 					0,
@@ -34051,7 +29325,7 @@ false,false,9733146001977147
 					,[
 					[
 						4,
-						24
+						14
 					]
 					]
 				]
@@ -34085,7 +29359,7 @@ false,false,9733146001977147
 				626875317216201,
 				[
 				[
-					4,
+					2,
 					cr.plugins_.Sprite.prototype.cnds.IsOverlapping,
 					null,
 					0,
@@ -34096,7 +29370,7 @@ false,false,9733146001977147
 					,[
 					[
 						4,
-						25
+						15
 					]
 					]
 				]
@@ -34130,7 +29404,7 @@ false,false,9733146001977147
 				6855544886510981,
 				[
 				[
-					4,
+					2,
 					cr.plugins_.Sprite.prototype.cnds.IsOverlapping,
 					null,
 					0,
@@ -34141,7 +29415,7 @@ false,false,9733146001977147
 					,[
 					[
 						4,
-						26
+						16
 					]
 					]
 				]
@@ -34256,7 +29530,7 @@ false,false,9733146001977147
 						7,
 						[
 							20,
-							22,
+							12,
 							cr.plugins_.Arr.prototype.exps.Height,
 							false,
 							null
@@ -34267,7 +29541,7 @@ false,false,9733146001977147
 				],
 				[
 				[
-					6,
+					3,
 					cr.plugins_.Function.prototype.acts.CallFunction,
 					null,
 					7434254450633552
@@ -34293,7 +29567,7 @@ false,false,9733146001977147
 				5943723868892999,
 				[
 				[
-					4,
+					2,
 					cr.plugins_.Sprite.prototype.cnds.IsOverlapping,
 					null,
 					0,
@@ -34304,7 +29578,7 @@ false,false,9733146001977147
 					,[
 					[
 						4,
-						24
+						14
 					]
 					]
 				]
@@ -34381,7 +29655,7 @@ false,false,9733146001977147
 					],
 					[
 					[
-						6,
+						3,
 						cr.plugins_.Function.prototype.acts.CallFunction,
 						null,
 						7861278445132542
@@ -34436,7 +29710,7 @@ false,false,9733146001977147
 					],
 					[
 					[
-						6,
+						3,
 						cr.plugins_.Function.prototype.acts.CallFunction,
 						null,
 						8373474405353239
@@ -34466,7 +29740,7 @@ false,false,9733146001977147
 			1210823697996199,
 			[
 			[
-				6,
+				3,
 				cr.plugins_.Function.prototype.cnds.OnFunction,
 				null,
 				2,
@@ -34487,7 +29761,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				4,
+				2,
 				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
 				null,
 				2494667318711097
@@ -34529,7 +29803,7 @@ false,false,9733146001977147
 			5295502261820963,
 			[
 			[
-				6,
+				3,
 				cr.plugins_.Function.prototype.cnds.OnFunction,
 				null,
 				2,
@@ -34550,7 +29824,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				4,
+				2,
 				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
 				null,
 				324137895656796
@@ -34583,21 +29857,6 @@ false,false,9733146001977147
 				]
 				]
 			]
-,			[
-				13,
-				cr.plugins_.Text.prototype.acts.SetText,
-				null,
-				3219659323553457
-				,[
-				[
-					7,
-					[
-						2,
-						"llego"
-					]
-				]
-				]
-			]
 			]
 		]
 ,		[
@@ -34607,7 +29866,7 @@ false,false,9733146001977147
 			4197069841327228,
 			[
 			[
-				6,
+				3,
 				cr.plugins_.Function.prototype.cnds.OnFunction,
 				null,
 				2,
@@ -34628,7 +29887,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				4,
+				2,
 				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
 				null,
 				1560002251436124
@@ -34670,7 +29929,7 @@ false,false,9733146001977147
 			1682376009091086,
 			[
 			[
-				6,
+				3,
 				cr.plugins_.Function.prototype.cnds.OnFunction,
 				null,
 				2,
@@ -34691,7 +29950,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				4,
+				2,
 				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
 				null,
 				6784444596109543
@@ -34737,7 +29996,7 @@ false,false,9733146001977147
 			8899783149859175,
 			[
 			[
-				6,
+				3,
 				cr.plugins_.Function.prototype.cnds.OnFunction,
 				null,
 				2,
@@ -34758,7 +30017,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				4,
+				2,
 				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
 				null,
 				8720873005079578
@@ -34800,7 +30059,7 @@ false,false,9733146001977147
 			2559110341946524,
 			[
 			[
-				6,
+				3,
 				cr.plugins_.Function.prototype.cnds.OnFunction,
 				null,
 				2,
@@ -34821,7 +30080,7 @@ false,false,9733146001977147
 			],
 			[
 			[
-				34,
+				18,
 				cr.plugins_.Sprite.prototype.acts.SetPos,
 				null,
 				9500661966167925
@@ -34830,7 +30089,7 @@ false,false,9733146001977147
 					0,
 					[
 						20,
-						22,
+						12,
 						cr.plugins_.Arr.prototype.exps.At,
 						false,
 						null
@@ -34850,7 +30109,7 @@ false,false,9733146001977147
 					0,
 					[
 						20,
-						22,
+						12,
 						cr.plugins_.Arr.prototype.exps.At,
 						false,
 						null
@@ -34907,14 +30166,14 @@ false,false,9733146001977147
 				]
 			]
 ,			[
-				33,
+				17,
 				cr.plugins_.Sprite.prototype.acts.SetPosToObject,
 				null,
 				7628243582005722
 				,[
 				[
 					4,
-					34
+					18
 				]
 ,				[
 					7,
@@ -34926,14 +30185,14 @@ false,false,9733146001977147
 				]
 			]
 ,			[
-				37,
+				19,
 				cr.plugins_.c2canvas.prototype.acts.PasteObject,
 				null,
 				5530969490887336
 				,[
 				[
 					4,
-					34
+					18
 				]
 				]
 			]
@@ -34997,10 +30256,10 @@ false,false,9733146001977147
 	1024,
 	4,
 	true,
-	true,
-	true,
+	false,
+	false,
 	"0.4",
-	1,
+	0,
 	false,
 	0,
 	false,
