@@ -29138,6 +29138,22 @@ false,false,9733146001977147
 				]
 				]
 			]
+,			[
+				2,
+				cr.plugins_.Sprite.prototype.cnds.IsOverlapping,
+				null,
+				0,
+				false,
+				false,
+				false,
+				8901499019859844
+				,[
+				[
+					4,
+					14
+				]
+				]
+			]
 			],
 			[
 			[
