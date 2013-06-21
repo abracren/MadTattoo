@@ -29347,9 +29347,124 @@ false,false,9733146001977147
 				0,
 				null,
 				false,
+				6001511591276998,
+				[
+				[
+					2,
+					cr.plugins_.Sprite.prototype.cnds.OnCollision,
+					null,
+					0,
+					false,
+					false,
+					true,
+					4971382945026607
+					,[
+					[
+						4,
+						6
+					]
+					]
+				]
+				],
+				[
+				[
+					3,
+					cr.plugins_.Function.prototype.acts.CallFunction,
+					null,
+					354343753581624
+					,[
+					[
+						1,
+						[
+							2,
+							"rebotarL"
+						]
+					]
+,					[
+						13,
+					]
+					]
+				]
+				]
+			]
+,			[
+				0,
+				null,
+				false,
+				5459657443102947,
+				[
+				[
+					2,
+					cr.plugins_.Sprite.prototype.cnds.OnCollision,
+					null,
+					0,
+					false,
+					false,
+					true,
+					8627694203641618
+					,[
+					[
+						4,
+						7
+					]
+					]
+				]
+				],
+				[
+				[
+					3,
+					cr.plugins_.Function.prototype.acts.CallFunction,
+					null,
+					458316008351835
+					,[
+					[
+						1,
+						[
+							2,
+							"rebotarR"
+						]
+					]
+,					[
+						13,
+					]
+					]
+				]
+				]
+			]
+,			[
+				0,
+				null,
+				false,
 				4441001022146432,
 				[
 				[
+					-1,
+					cr.system_object.prototype.cnds.CompareVar,
+					null,
+					0,
+					false,
+					false,
+					false,
+					3586095657993014
+					,[
+					[
+						11,
+						"distorsion"
+					]
+,					[
+						8,
+						0
+					]
+,					[
+						7,
+						[
+							0,
+							0
+						]
+					]
+					]
+				]
+,				[
 					-1,
 					cr.system_object.prototype.cnds.CompareVar,
 					null,
@@ -29401,6 +29516,105 @@ false,false,9733146001977147
 				]
 				]
 			]
+,			[
+				0,
+				null,
+				false,
+				5943723868892999,
+				[
+				[
+					2,
+					cr.plugins_.Sprite.prototype.cnds.IsOverlapping,
+					null,
+					0,
+					false,
+					false,
+					false,
+					4518792704653539
+					,[
+					[
+						4,
+						14
+					]
+					]
+				]
+,				[
+					-1,
+					cr.system_object.prototype.cnds.CompareBetween,
+					null,
+					0,
+					false,
+					false,
+					false,
+					4978835659621626
+					,[
+					[
+						0,
+						[
+							23,
+							"conta"
+						]
+					]
+,					[
+						0,
+						[
+							0,
+							0
+						]
+					]
+,					[
+						0,
+						[
+							0,
+							30
+						]
+					]
+					]
+				]
+				],
+				[
+				[
+					3,
+					cr.plugins_.Function.prototype.acts.CallFunction,
+					null,
+					3340930741474911
+					,[
+					[
+						1,
+						[
+							2,
+							"escapar"
+						]
+					]
+,					[
+						13,
+					]
+					]
+				]
+				]
+				,[
+				[
+					0,
+					null,
+					false,
+					1946867643398752,
+					[
+					],
+					[
+					]
+				]
+,				[
+					0,
+					null,
+					false,
+					3429374882832717,
+					[
+					],
+					[
+					]
+				]
+				]
+			]
 			]
 		]
 ,		[
@@ -29430,6 +29644,40 @@ false,false,9733146001977147
 			]
 			],
 			[
+			[
+				2,
+				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
+				null,
+				2494667318711097
+				,[
+				[
+					0,
+					[
+						0,
+						180
+					]
+				]
+,				[
+					0,
+					[
+						19,
+						cr.system_object.prototype.exps.floor
+						,[
+[
+							19,
+							cr.system_object.prototype.exps.random
+							,[
+[
+								0,
+								-100
+							]
+							]
+						]
+						]
+					]
+				]
+				]
+			]
 			]
 		]
 ,		[
@@ -29459,6 +29707,40 @@ false,false,9733146001977147
 			]
 			],
 			[
+			[
+				2,
+				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
+				null,
+				324137895656796
+				,[
+				[
+					0,
+					[
+						0,
+						180
+					]
+				]
+,				[
+					0,
+					[
+						19,
+						cr.system_object.prototype.exps.floor
+						,[
+[
+							19,
+							cr.system_object.prototype.exps.random
+							,[
+[
+								0,
+								100
+							]
+							]
+						]
+						]
+					]
+				]
+				]
+			]
 			]
 		]
 ,		[
@@ -29488,6 +29770,40 @@ false,false,9733146001977147
 			]
 			],
 			[
+			[
+				2,
+				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
+				null,
+				1560002251436124
+				,[
+				[
+					0,
+					[
+						0,
+						180
+					]
+				]
+,				[
+					0,
+					[
+						19,
+						cr.system_object.prototype.exps.floor
+						,[
+[
+							19,
+							cr.system_object.prototype.exps.random
+							,[
+[
+								0,
+								-80
+							]
+							]
+						]
+						]
+					]
+				]
+				]
+			]
 			]
 		]
 ,		[
@@ -29517,6 +29833,44 @@ false,false,9733146001977147
 			]
 			],
 			[
+			[
+				2,
+				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
+				null,
+				6784444596109543
+				,[
+				[
+					0,
+					[
+						0,
+						180
+					]
+				]
+,				[
+					0,
+					[
+						19,
+						cr.system_object.prototype.exps.floor
+						,[
+[
+							19,
+							cr.system_object.prototype.exps.random
+							,[
+[
+								0,
+								-80
+							]
+,[
+								0,
+								80
+							]
+							]
+						]
+						]
+					]
+				]
+				]
+			]
 			]
 		]
 ,		[
@@ -29546,6 +29900,40 @@ false,false,9733146001977147
 			]
 			],
 			[
+			[
+				2,
+				cr.plugins_.Sprite.prototype.acts.MoveAtAngle,
+				null,
+				8720873005079578
+				,[
+				[
+					0,
+					[
+						0,
+						180
+					]
+				]
+,				[
+					0,
+					[
+						19,
+						cr.system_object.prototype.exps.floor
+						,[
+[
+							19,
+							cr.system_object.prototype.exps.random
+							,[
+[
+								0,
+								80
+							]
+							]
+						]
+						]
+					]
+				]
+				]
+			]
 			]
 		]
 ,		[
