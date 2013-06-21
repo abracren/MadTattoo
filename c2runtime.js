@@ -29363,13 +29363,22 @@ false,false,9733146001977147
 			[
 			[
 				-1,
-				cr.system_object.prototype.cnds.EveryTick,
+				cr.system_object.prototype.cnds.Every,
 				null,
 				0,
 				false,
 				false,
 				false,
 				5279825715613473
+				,[
+				[
+					0,
+					[
+						1,
+						0.1
+					]
+				]
+				]
 			]
 			],
 			[
@@ -30481,7 +30490,7 @@ false,false,9733146001977147
 	]
 	],
 	"media/",
-	false,
+	true,
 	768,
 	1024,
 	4,
