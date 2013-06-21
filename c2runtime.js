@@ -12710,6 +12710,202 @@ cr.plugins_.Sprite = function(runtime)
 }());
 ;
 ;
+cr.plugins_.TiledBg = function(runtime)
+{
+	this.runtime = runtime;
+};
+(function ()
+{
+	var pluginProto = cr.plugins_.TiledBg.prototype;
+	pluginProto.Type = function(plugin)
+	{
+		this.plugin = plugin;
+		this.runtime = plugin.runtime;
+	};
+	var typeProto = pluginProto.Type.prototype;
+	typeProto.onCreate = function()
+	{
+		if (this.is_family)
+			return;
+		this.texture_img = new Image();
+		this.texture_img.src = this.texture_file;
+		this.texture_img.cr_filesize = this.texture_filesize;
+		this.runtime.wait_for_textures.push(this.texture_img);
+		this.pattern = null;
+		this.webGL_texture = null;
+	};
+	typeProto.onLostWebGLContext = function ()
+	{
+		if (this.is_family)
+			return;
+		this.webGL_texture = null;
+	};
+	typeProto.onRestoreWebGLContext = function ()
+	{
+		if (this.is_family || !this.instances.length)
+			return;
+		if (!this.webGL_texture)
+		{
+			this.webGL_texture = this.runtime.glwrap.loadTexture(this.texture_img, true, this.runtime.linearSampling, this.texture_pixelformat);
+		}
+		var i, len;
+		for (i = 0, len = this.instances.length; i < len; i++)
+			this.instances[i].webGL_texture = this.webGL_texture;
+	};
+	typeProto.unloadTextures = function ()
+	{
+		if (this.is_family || this.instances.length)
+			return;
+		if (this.runtime.glwrap)
+		{
+			if (this.webGL_texture)
+			{
+				this.runtime.glwrap.deleteTexture(this.webGL_texture);
+				this.webGL_texture = null;
+			}
+		}
+		else
+		{
+			if (this.texture_img["hintUnload"])
+				this.texture_img["hintUnload"]();
+		}
+	};
+	typeProto.preloadCanvas2D = function (ctx)
+	{
+		ctx.drawImage(this.texture_img, 0, 0);
+	};
+	pluginProto.Instance = function(type)
+	{
+		this.type = type;
+		this.runtime = type.runtime;
+	};
+	var instanceProto = pluginProto.Instance.prototype;
+	instanceProto.onCreate = function()
+	{
+		this.visible = (this.properties[0] === 0);							// 0=visible, 1=invisible
+		this.rcTex = new cr.rect(0, 0, 0, 0);
+		this.has_own_texture = false;										// true if a texture loaded in from URL
+		this.texture_img = this.type.texture_img;
+		if (this.runtime.glwrap)
+		{
+			if (!this.type.webGL_texture)
+			{
+				this.type.webGL_texture = this.runtime.glwrap.loadTexture(this.type.texture_img, true, this.runtime.linearSampling, this.type.texture_pixelformat);
+			}
+			this.webGL_texture = this.type.webGL_texture;
+		}
+		else
+		{
+			if (this.texture_img["hintLoad"])
+				this.texture_img["hintLoad"]();
+			if (!this.type.pattern)
+				this.type.pattern = this.runtime.ctx.createPattern(this.type.texture_img, "repeat");
+			this.pattern = this.type.pattern;
+		}
+	};
+	instanceProto.afterLoad = function ()
+	{
+		this.has_own_texture = false;
+		this.texture_img = this.type.texture_img;
+	};
+	instanceProto.onDestroy = function ()
+	{
+		if (this.runtime.glwrap && this.has_own_texture && this.webGL_texture)
+		{
+			this.runtime.glwrap.deleteTexture(this.webGL_texture);
+			this.webGL_texture = null;
+		}
+	};
+	instanceProto.draw = function(ctx)
+	{
+		ctx.globalAlpha = this.opacity;
+		ctx.save();
+		ctx.fillStyle = this.pattern;
+		var myx = this.x;
+		var myy = this.y;
+		if (this.runtime.pixel_rounding)
+		{
+			myx = (myx + 0.5) | 0;
+			myy = (myy + 0.5) | 0;
+		}
+		var drawX = -(this.hotspotX * this.width);
+		var drawY = -(this.hotspotY * this.height);
+		var offX = drawX % this.texture_img.width;
+		var offY = drawY % this.texture_img.height;
+		if (offX < 0)
+			offX += this.texture_img.width;
+		if (offY < 0)
+			offY += this.texture_img.height;
+		ctx.translate(myx, myy);
+		ctx.rotate(this.angle);
+		ctx.translate(offX, offY);
+		ctx.fillRect(drawX - offX,
+					 drawY - offY,
+					 this.width,
+					 this.height);
+		ctx.restore();
+	};
+	instanceProto.drawGL = function(glw)
+	{
+		glw.setTexture(this.webGL_texture);
+		glw.setOpacity(this.opacity);
+		var rcTex = this.rcTex;
+		rcTex.right = this.width / this.texture_img.width;
+		rcTex.bottom = this.height / this.texture_img.height;
+		var q = this.bquad;
+		if (this.runtime.pixel_rounding)
+		{
+			var ox = ((this.x + 0.5) | 0) - this.x;
+			var oy = ((this.y + 0.5) | 0) - this.y;
+			glw.quadTex(q.tlx + ox, q.tly + oy, q.trx + ox, q.try_ + oy, q.brx + ox, q.bry + oy, q.blx + ox, q.bly + oy, rcTex);
+		}
+		else
+			glw.quadTex(q.tlx, q.tly, q.trx, q.try_, q.brx, q.bry, q.blx, q.bly, rcTex);
+	};
+	function Cnds() {};
+	Cnds.prototype.OnURLLoaded = function ()
+	{
+		return true;
+	};
+	pluginProto.cnds = new Cnds();
+	function Acts() {};
+	Acts.prototype.SetEffect = function (effect)
+	{
+		this.compositeOp = cr.effectToCompositeOp(effect);
+		cr.setGLBlend(this, effect, this.runtime.gl);
+		this.runtime.redraw = true;
+	};
+	Acts.prototype.LoadURL = function (url_)
+	{
+		var img = new Image();
+		var self = this;
+		img.onload = function ()
+		{
+			self.texture_img = img;
+			if (self.runtime.glwrap)
+			{
+				if (self.has_own_texture && self.webGL_texture)
+					self.runtime.glwrap.deleteTexture(self.webGL_texture);
+				self.webGL_texture = self.runtime.glwrap.loadTexture(img, true, self.runtime.linearSampling);
+			}
+			else
+			{
+				self.pattern = self.runtime.ctx.createPattern(img, "repeat");
+			}
+			self.has_own_texture = true;
+			self.runtime.redraw = true;
+			self.runtime.trigger(cr.plugins_.TiledBg.prototype.cnds.OnURLLoaded, self);
+		};
+		if (url_.substr(0, 5) !== "data:")
+			img.crossOrigin = 'anonymous';
+		img.src = url_;
+	};
+	pluginProto.acts = new Acts();
+	function Exps() {};
+	pluginProto.exps = new Exps();
+}());
+;
+;
 cr.plugins_.Touch = function(runtime)
 {
 	this.runtime = runtime;
@@ -14602,6 +14798,18 @@ cr.getProjectModel = function() { return [
 		false
 	]
 ,	[
+		cr.plugins_.TiledBg,
+		false,
+		true,
+		true,
+		true,
+		true,
+		true,
+		true,
+		true,
+		true
+	]
+,	[
 		cr.plugins_.Touch,
 		true,
 		false,
@@ -15173,6 +15381,22 @@ cr.getProjectModel = function() { return [
 		7740115581153225,
 		[]
 	]
+,	[
+		"t20",
+		cr.plugins_.TiledBg,
+		false,
+		[],
+		0,
+		0,
+		["images/tiledbackground.png", 211, 0],
+		null,
+		[
+		],
+		false,
+		false,
+		1997993402067184,
+		[]
+	]
 	],
 	[
 	],
@@ -15201,6 +15425,19 @@ cr.getProjectModel = function() { return [
 			0,
 			[
 			[
+				[4, 8, 0, 762, 1001, 0, 0, 1, 0, 0, 0, 0, []],
+				20,
+				3,
+				[
+				],
+				[
+				],
+				[
+					0,
+					0
+				]
+			]
+,			[
 				[1000, 328, 0, 2, 2, 0, 0, 1, 0.5, 0.5, 0, 0, []],
 				18,
 				893,
@@ -15216,7 +15453,7 @@ cr.getProjectModel = function() { return [
 				]
 			]
 ,			[
-				[164, 315, 0, 490, 272, 0, 0, 1, 0, 0, 0, 0, []],
+				[156, 255, 0, 518, 336, 0, 0, 1, 0, 0, 0, 0, []],
 				19,
 				8,
 				[
@@ -28767,13 +29004,19 @@ false,false,9733146001977147
 			[
 			[
 				8,
-				cr.plugins_.Touch.prototype.cnds.IsInTouch,
+				cr.plugins_.Touch.prototype.cnds.IsTouchingObject,
 				null,
 				0,
 				false,
 				false,
 				false,
-				761011421820008
+				8498731268253592
+				,[
+				[
+					4,
+					10
+				]
+				]
 			]
 			],
 			[
@@ -28820,6 +29063,47 @@ false,false,9733146001977147
 				cr.behaviors.EightDir.prototype.acts.SimulateControl,
 				"8Direction",
 				9328867896726971
+				,[
+				[
+					3,
+					0
+				]
+				]
+			]
+			]
+		]
+,		[
+			0,
+			null,
+			false,
+			5188081303882506,
+			[
+			[
+				8,
+				cr.plugins_.Touch.prototype.cnds.HasNthTouch,
+				null,
+				0,
+				false,
+				false,
+				false,
+				7160989547688565
+				,[
+				[
+					0,
+					[
+						0,
+						20
+					]
+				]
+				]
+			]
+			],
+			[
+			[
+				2,
+				cr.behaviors.EightDir.prototype.acts.SetIgnoreInput,
+				"8Direction",
+				3536825430943938
 				,[
 				[
 					3,
