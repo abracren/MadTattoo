@@ -29016,7 +29016,7 @@ false,false,9733146001977147
 					0,
 					[
 						1,
-						0.1
+						0.05
 					]
 				]
 				]
@@ -29289,6 +29289,117 @@ false,false,9733146001977147
 				cr.plugins_.Sprite.prototype.acts.Destroy,
 				null,
 				7533080112053269
+			]
+			]
+		]
+,		[
+			0,
+			null,
+			false,
+			6695121303468308,
+			[
+			[
+				-1,
+				cr.system_object.prototype.cnds.EveryTick,
+				null,
+				0,
+				false,
+				false,
+				false,
+				5279825715613473
+			]
+			],
+			[
+			[
+				-1,
+				cr.system_object.prototype.acts.SetVar,
+				null,
+				4164485630920819
+				,[
+				[
+					11,
+					"conta"
+				]
+,				[
+					7,
+					[
+						19,
+						cr.system_object.prototype.exps.floor
+						,[
+[
+							19,
+							cr.system_object.prototype.exps.random
+							,[
+[
+								0,
+								1000
+							]
+							]
+						]
+						]
+					]
+				]
+				]
+			]
+			]
+			,[
+			[
+				0,
+				null,
+				false,
+				4441001022146432,
+				[
+				[
+					-1,
+					cr.system_object.prototype.cnds.CompareVar,
+					null,
+					0,
+					false,
+					false,
+					false,
+					3913668373451419
+					,[
+					[
+						11,
+						"una"
+					]
+,					[
+						8,
+						2
+					]
+,					[
+						7,
+						[
+							20,
+							12,
+							cr.plugins_.Arr.prototype.exps.Height,
+							false,
+							null
+						]
+					]
+					]
+				]
+				],
+				[
+				[
+					3,
+					cr.plugins_.Function.prototype.acts.CallFunction,
+					null,
+					7434254450633552
+					,[
+					[
+						1,
+						[
+							2,
+							"pintar"
+						]
+					]
+,					[
+						13,
+					]
+					]
+				]
+				]
 			]
 			]
 		]
@@ -29601,6 +29712,33 @@ false,false,9733146001977147
 			false,
 			5543242632349971,
 			[
+			[
+				-1,
+				cr.system_object.prototype.cnds.CompareVar,
+				null,
+				0,
+				false,
+				false,
+				false,
+				1279180759368676
+				,[
+				[
+					11,
+					"absCenter"
+				]
+,				[
+					8,
+					0
+				]
+,				[
+					7,
+					[
+						0,
+						0
+					]
+				]
+				]
+			]
 			],
 			[
 			]
