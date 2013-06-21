@@ -15507,9 +15507,9 @@ cr.getProjectModel = function() { return [
 				],
 				[
 				[
-					5000,
-					5000,
-					5000,
+					3000,
+					3000,
+					3000,
 					1,
 					0,
 					1
