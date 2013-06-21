@@ -15354,7 +15354,7 @@ cr.getProjectModel = function() { return [
 			false,
 			8167572291082475,
 			[
-				["images/pint-sheet0.png", 156, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],1]
+				["images/pint-sheet0.png", 156, 0, 0, 256, 256, 1, 0.5, 0.5,[],[],4]
 			]
 			]
 		],
@@ -15397,6 +15397,35 @@ cr.getProjectModel = function() { return [
 		1997993402067184,
 		[]
 	]
+,	[
+		"t21",
+		cr.plugins_.Sprite,
+		false,
+		[],
+		0,
+		0,
+		null,
+		[
+			[
+			"Default",
+			5,
+			false,
+			1,
+			0,
+			false,
+			9615923244724738,
+			[
+				["images/sprite-sheet0.png", 253562, 0, 0, 686, 1366, 1, 0.5, 0.5,[],[],1]
+			]
+			]
+		],
+		[
+		],
+		false,
+		false,
+		5262845063130825,
+		[]
+	]
 	],
 	[
 	],
@@ -15425,8 +15454,8 @@ cr.getProjectModel = function() { return [
 			0,
 			[
 			[
-				[4, 8, 0, 762, 1001, 0, 0, 1, 0, 0, 0, 0, []],
-				20,
+				[422, 397, 0, 1314, 2230, 0, 0, 1, 0.5, 0.5, 0, 0, []],
+				21,
 				3,
 				[
 				],
@@ -15434,7 +15463,9 @@ cr.getProjectModel = function() { return [
 				],
 				[
 					0,
-					0
+					"Default",
+					0,
+					1
 				]
 			]
 ,			[
@@ -15507,9 +15538,9 @@ cr.getProjectModel = function() { return [
 				],
 				[
 				[
-					3000,
-					3000,
-					3000,
+					4000,
+					4000,
+					4000,
 					1,
 					0,
 					1
@@ -29359,6 +29390,207 @@ false,false,9733146001977147
 			0,
 			null,
 			false,
+			3028711298070774,
+			[
+			[
+				-1,
+				cr.system_object.prototype.cnds.Every,
+				null,
+				0,
+				false,
+				false,
+				false,
+				4165925603778707
+				,[
+				[
+					0,
+					[
+						1,
+						0.05
+					]
+				]
+				]
+			]
+			],
+			[
+			]
+			,[
+			[
+				0,
+				null,
+				false,
+				9405199756863441,
+				[
+				[
+					-1,
+					cr.system_object.prototype.cnds.CompareVar,
+					null,
+					0,
+					false,
+					false,
+					false,
+					2781569331925259
+					,[
+					[
+						11,
+						"distorsion"
+					]
+,					[
+						8,
+						0
+					]
+,					[
+						7,
+						[
+							0,
+							0
+						]
+					]
+					]
+				]
+,				[
+					-1,
+					cr.system_object.prototype.cnds.CompareVar,
+					null,
+					0,
+					false,
+					false,
+					false,
+					7651790033314298
+					,[
+					[
+						11,
+						"una"
+					]
+,					[
+						8,
+						2
+					]
+,					[
+						7,
+						[
+							20,
+							12,
+							cr.plugins_.Arr.prototype.exps.Height,
+							false,
+							null
+						]
+					]
+					]
+				]
+				],
+				[
+				[
+					3,
+					cr.plugins_.Function.prototype.acts.CallFunction,
+					null,
+					9056094458751961
+					,[
+					[
+						1,
+						[
+							2,
+							"pintar"
+						]
+					]
+,					[
+						13,
+					]
+					]
+				]
+				]
+			]
+,			[
+				0,
+				null,
+				false,
+				9316567362480803,
+				[
+				[
+					-1,
+					cr.system_object.prototype.cnds.CompareVar,
+					null,
+					0,
+					false,
+					false,
+					false,
+					2825352071457607
+					,[
+					[
+						11,
+						"distorsion"
+					]
+,					[
+						8,
+						0
+					]
+,					[
+						7,
+						[
+							0,
+							1
+						]
+					]
+					]
+				]
+,				[
+					-1,
+					cr.system_object.prototype.cnds.CompareVar,
+					null,
+					0,
+					false,
+					false,
+					false,
+					9883392157155323
+					,[
+					[
+						11,
+						"una"
+					]
+,					[
+						8,
+						2
+					]
+,					[
+						7,
+						[
+							20,
+							12,
+							cr.plugins_.Arr.prototype.exps.Height,
+							false,
+							null
+						]
+					]
+					]
+				]
+				],
+				[
+				[
+					3,
+					cr.plugins_.Function.prototype.acts.CallFunction,
+					null,
+					5915186662139118
+					,[
+					[
+						1,
+						[
+							2,
+							"pintarmal"
+						]
+					]
+,					[
+						13,
+					]
+					]
+				]
+				]
+			]
+			]
+		]
+,		[
+			0,
+			null,
+			false,
 			6695121303468308,
 			[
 			[
@@ -29853,176 +30085,6 @@ false,false,9733146001977147
 				0,
 				null,
 				false,
-				4441001022146432,
-				[
-				[
-					-1,
-					cr.system_object.prototype.cnds.CompareVar,
-					null,
-					0,
-					false,
-					false,
-					false,
-					3586095657993014
-					,[
-					[
-						11,
-						"distorsion"
-					]
-,					[
-						8,
-						0
-					]
-,					[
-						7,
-						[
-							0,
-							0
-						]
-					]
-					]
-				]
-,				[
-					-1,
-					cr.system_object.prototype.cnds.CompareVar,
-					null,
-					0,
-					false,
-					false,
-					false,
-					3913668373451419
-					,[
-					[
-						11,
-						"una"
-					]
-,					[
-						8,
-						2
-					]
-,					[
-						7,
-						[
-							20,
-							12,
-							cr.plugins_.Arr.prototype.exps.Height,
-							false,
-							null
-						]
-					]
-					]
-				]
-				],
-				[
-				[
-					3,
-					cr.plugins_.Function.prototype.acts.CallFunction,
-					null,
-					7434254450633552
-					,[
-					[
-						1,
-						[
-							2,
-							"pintar"
-						]
-					]
-,					[
-						13,
-					]
-					]
-				]
-				]
-			]
-,			[
-				0,
-				null,
-				false,
-				4679708189137907,
-				[
-				[
-					-1,
-					cr.system_object.prototype.cnds.CompareVar,
-					null,
-					0,
-					false,
-					false,
-					false,
-					530000008411354
-					,[
-					[
-						11,
-						"distorsion"
-					]
-,					[
-						8,
-						0
-					]
-,					[
-						7,
-						[
-							0,
-							1
-						]
-					]
-					]
-				]
-,				[
-					-1,
-					cr.system_object.prototype.cnds.CompareVar,
-					null,
-					0,
-					false,
-					false,
-					false,
-					7057574535365847
-					,[
-					[
-						11,
-						"una"
-					]
-,					[
-						8,
-						2
-					]
-,					[
-						7,
-						[
-							20,
-							12,
-							cr.plugins_.Arr.prototype.exps.Height,
-							false,
-							null
-						]
-					]
-					]
-				]
-				],
-				[
-				[
-					3,
-					cr.plugins_.Function.prototype.acts.CallFunction,
-					null,
-					4773067262101935
-					,[
-					[
-						1,
-						[
-							2,
-							"pintarmal"
-						]
-					]
-,					[
-						13,
-					]
-					]
-				]
-				]
-			]
-,			[
-				0,
-				null,
-				false,
 				5943723868892999,
 				[
 				[
@@ -30188,6 +30250,16 @@ false,false,9733146001977147
 					]
 					]
 				]
+				]
+			]
+,			[
+				0,
+				null,
+				false,
+				9889471565482702,
+				[
+				],
+				[
 				]
 			]
 			]
@@ -30735,6 +30807,21 @@ false,false,9733146001977147
 							40
 						]
 						]
+					]
+				]
+				]
+			]
+,			[
+				18,
+				cr.plugins_.Sprite.prototype.acts.SetHeight,
+				null,
+				8401861396928426
+				,[
+				[
+					0,
+					[
+						1,
+						1.5
 					]
 				]
 				]
