@@ -1,9 +1,9 @@
 ﻿<?xml version="1.0" encoding="UTF-8"?>
-<widget xmlns="http://www.w3.org/ns/widgets" xmlns:gap="http://phonegap.com/ns/1.0" id="com.mxdesign.madtattoo" version="0.4">
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:gap="http://phonegap.com/ns/1.0" id="com.mxdesign.madtatoo051" version="1.0.0.0">
 
-	<name>MadTattoo</name>
+	<name>madTatoo_51</name>
 	<description>game</description>
-	<author href="http://www.mxdesign.com.ar" email="arielgkuhn@gmail.com">Ariel Kuhn</author>
+	<author href="http://mxdesign.com.ar" email="arielgkuhn@gmail.com">Ariel Kuhn</author>
 
 	<gap:platforms>
 		<gap:platform name="ios" />
@@ -13,11 +13,12 @@
 		<gap:platform name="blackberry" project="widgets"/>
 	</gap:platforms>
 
-	<icon src="icon_128.png" width="128" height="128" gap:role="default" />
+	<icon src="icon-128.png" width="128" height="128" gap:role="default" />
 
 	<preference name="permissions" value="none"/>
 
-	<feature name="http://api.phonegap.com/1.0/network"/>	<preference name="orientation" value="portrait" />
+	<feature name="http://api.phonegap.com/1.0/network"/>
+	<preference name="orientation" value="portrait" />
 	<preference name="fullscreen" value="true" />
 	<preference name="target-device" value="universal" />
 
